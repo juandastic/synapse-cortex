@@ -8,6 +8,9 @@ services:
   neo4j:
     image: neo4j:5-community
     container_name: neo4j_db
+    ports:
+      - "127.0.0.1:7474:7474"  # Browser UI (localhost only, for SSH tunnel)
+      - "127.0.0.1:7687:7687"  # Bolt Protocol (localhost only, for SSH tunnel)
     environment:
       - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD}
       - NEO4J_PLUGINS=["apoc"]
