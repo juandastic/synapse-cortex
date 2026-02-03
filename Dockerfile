@@ -2,7 +2,7 @@
 # Uses tiangolo/uvicorn-gunicorn-fastapi for optimized production serving
 # Gunicorn manages multiple Uvicorn workers, auto-scales to CPU cores
 
-FROM tiangolo/uvicorn-gunicorn-fastapi:python3.12
+FROM tiangolo/uvicorn-gunicorn-fastapi:python3.11
 
 # Install dependencies
 COPY requirements.txt /app/
