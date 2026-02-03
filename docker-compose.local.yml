@@ -1,0 +1,26 @@
+# Local Development - Neo4j Only
+# FastAPI runs natively with venv for hot-reload
+#
+# Usage:
+#   docker-compose -f docker-compose.local.yml up -d
+#   uvicorn app.main:app --reload
+
+services:
+  neo4j:
+    image: neo4j:community
+    container_name: neo4j_local
+    ports:
+      - "7474:7474"  # Browser UI
+      - "7687:7687"  # Bolt Protocol
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-localpassword}
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: wget -qO- http://localhost:7474 || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  neo4j_data:
