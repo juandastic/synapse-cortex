@@ -26,6 +26,7 @@ services:
     build: .
     container_name: fastapi_api
     environment:
+      - PORT=8000
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
