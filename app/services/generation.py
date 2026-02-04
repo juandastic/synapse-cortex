@@ -1,7 +1,7 @@
 """
 Generation Service - Gemini streaming with OpenAI-compatible SSE format.
 
-Wraps the Google Generative AI SDK and outputs SSE-formatted chunks
+Wraps the Google GenAI SDK and outputs SSE-formatted chunks
 compatible with OpenAI's streaming API format.
 """
 
@@ -11,7 +11,8 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from app.schemas.models import (
     ChatCompletionChoice,
@@ -28,7 +29,7 @@ class GenerationService:
     """Service for generating chat completions using Google Gemini."""
 
     def __init__(self, api_key: str):
-        genai.configure(api_key=api_key)
+        self._client = genai.Client(api_key=api_key)
 
     async def stream_chat_completion(
         self, request: ChatCompletionRequest
@@ -47,19 +48,7 @@ class GenerationService:
 
         try:
             # Convert messages to Gemini format
-            gemini_messages = self._convert_to_gemini_format(request.messages)
-
-            # Initialize the model
-            model = genai.GenerativeModel(request.model)
-
-            # Start streaming generation
-            response = model.generate_content(
-                gemini_messages,
-                stream=True,
-                generation_config=genai.GenerationConfig(
-                    candidate_count=1,
-                ),
-            )
+            gemini_contents = self._convert_to_gemini_format(request.messages)
 
             # Stream the first chunk with role
             first_chunk = ChatCompletionChunk(
@@ -76,8 +65,11 @@ class GenerationService:
             )
             yield f"data: {first_chunk.model_dump_json()}\n\n"
 
-            # Stream content chunks
-            for chunk in response:
+            # Use async client for true async streaming
+            async for chunk in await self._client.aio.models.generate_content_stream(
+                model=request.model,
+                contents=gemini_contents,
+            ):
                 if chunk.text:
                     content_chunk = ChatCompletionChunk(
                         id=completion_id,
