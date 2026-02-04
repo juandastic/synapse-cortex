@@ -5,7 +5,7 @@ API Routes - Endpoint definitions for Synapse Cortex.
 import logging
 
 from fastapi import APIRouter
-from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import StreamingResponse
 
 from app.api.dependencies import (
     ApiKeyDep,
@@ -101,7 +101,12 @@ async def chat_completions(
     
     Requires X-API-SECRET header for authentication.
     """
-    return EventSourceResponse(
+    return StreamingResponse(
         generation_service.stream_chat_completion(request),
         media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
     )
