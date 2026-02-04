@@ -58,7 +58,7 @@ class ChatCompletionRequest(BaseModel):
     """Request body for the /v1/chat/completions endpoint."""
 
     messages: list[ChatMessage]
-    model: str = Field(default="gemini-2.0-flash", description="Model to use for completion")
+    model: str = Field(default="gemini-3-flash-preview", description="Model to use for completion")
     stream: bool = Field(default=True, description="Whether to stream the response")
 
 

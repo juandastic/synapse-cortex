@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
         llm_client=GeminiClient(
             config=LLMConfig(
                 api_key=settings.google_api_key,
-                model="gemini-2.0-flash",
+                model="gemini-3-flash-preview",
             )
         ),
         embedder=GeminiEmbedder(
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         cross_encoder=GeminiRerankerClient(
             config=LLMConfig(
                 api_key=settings.google_api_key,
-                model="gemini-2.0-flash",
+                model="gemini-3-flash-preview",
             )
         ),
         max_coroutines=settings.semaphore_limit,
