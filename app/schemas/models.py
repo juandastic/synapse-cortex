@@ -33,11 +33,18 @@ class IngestRequest(BaseModel):
     metadata: IngestMetadata
 
 
+class IngestResponseMetadata(BaseModel):
+    """Metadata about the ingestion processing."""
+
+    model: str = Field(..., description="Gemini model used for ingestion")
+
+
 class IngestResponse(BaseModel):
     """Response body for the /ingest endpoint."""
 
     success: bool
     userKnowledgeCompilation: str | None = None
+    metadata: IngestResponseMetadata | None = None
     error: str | None = None
     code: str | None = None
 

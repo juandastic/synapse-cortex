@@ -62,7 +62,7 @@ async def lifespan(app: FastAPI):
         llm_client=GeminiClient(
             config=LLMConfig(
                 api_key=settings.google_api_key,
-                model="gemini-3-flash-preview",
+                model=settings.graphiti_model,
             )
         ),
         embedder=GeminiEmbedder(
@@ -74,12 +74,12 @@ async def lifespan(app: FastAPI):
         cross_encoder=GeminiRerankerClient(
             config=LLMConfig(
                 api_key=settings.google_api_key,
-                model="gemini-3-flash-preview",
+                model=settings.graphiti_model,
             )
         ),
         max_coroutines=settings.semaphore_limit,
     )
-    logger.info(f"Graphiti initialized with max_coroutines={settings.semaphore_limit}")
+    logger.info(f"Graphiti initialized with model={settings.graphiti_model}, max_coroutines={settings.semaphore_limit}")
 
     # Build indices and constraints (safe to call multiple times, only creates if missing)
     await graphiti.build_indices_and_constraints()
@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
-    ingestion_service = IngestionService(graphiti, hydration_service)
+    ingestion_service = IngestionService(graphiti, hydration_service, settings.graphiti_model)
     generation_service = GenerationService(settings.google_api_key)
 
     # Store in app state for dependency injection

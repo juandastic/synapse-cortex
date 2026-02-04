@@ -27,6 +27,9 @@ Edit `.env` with your credentials:
 NEO4J_PASSWORD=localpassword
 GOOGLE_API_KEY=your_gemini_api_key
 SYNAPSE_API_SECRET=your_api_secret
+
+# Optional: Change Graphiti model (default: gemini-3-flash-preview)
+# GRAPHITI_MODEL=gemini-2.5-flash
 ```
 
 ---
@@ -101,6 +104,9 @@ NEO4J_PASSWORD=<strong-random-password>
 GOOGLE_API_KEY=<your-gemini-api-key>
 SYNAPSE_API_SECRET=<your-api-secret>
 SEMAPHORE_LIMIT=3
+
+# Optional: Change Graphiti model (default: gemini-3-flash-preview)
+# GRAPHITI_MODEL=gemini-2.5-flash
 ```
 
 ### 3. Configure DNS

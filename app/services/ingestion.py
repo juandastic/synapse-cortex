@@ -12,7 +12,7 @@ from datetime import datetime
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
 
-from app.schemas.models import IngestMessage, IngestRequest, IngestResponse
+from app.schemas.models import IngestMessage, IngestRequest, IngestResponse, IngestResponseMetadata
 from app.services.hydration import HydrationService
 
 logger = logging.getLogger(__name__)
@@ -25,9 +25,10 @@ MIN_TOTAL_CHARS = 5
 class IngestionService:
     """Service for processing chat sessions into the knowledge graph."""
 
-    def __init__(self, graphiti: Graphiti, hydration_service: HydrationService):
+    def __init__(self, graphiti: Graphiti, hydration_service: HydrationService, model: str):
         self.graphiti = graphiti
         self.hydration_service = hydration_service
+        self.model = model
 
     async def process_session(self, request: IngestRequest) -> IngestResponse:
         """
@@ -53,6 +54,7 @@ class IngestionService:
                 return IngestResponse(
                     success=True,
                     userKnowledgeCompilation=compilation,
+                    metadata=IngestResponseMetadata(model=self.model),
                 )
 
             # Process via Graphiti
@@ -85,6 +87,7 @@ class IngestionService:
             return IngestResponse(
                 success=True,
                 userKnowledgeCompilation=compilation,
+                metadata=IngestResponseMetadata(model=self.model),
             )
 
         except Exception as e:
@@ -96,6 +99,7 @@ class IngestionService:
                 success=False,
                 error=str(e),
                 code="GRAPH_PROCESSING_ERROR",
+                metadata=IngestResponseMetadata(model=self.model),
             )
 
     def _should_ingest(self, messages: list[IngestMessage]) -> bool:

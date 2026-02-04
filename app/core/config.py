@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # Google Gemini API
     google_api_key: str
 
+    # Graphiti LLM Configuration
+    graphiti_model: str = "gemini-3-flash-preview"
+
     # API Security
     synapse_api_secret: str
 
