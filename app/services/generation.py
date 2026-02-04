@@ -110,7 +110,7 @@ class GenerationService:
             yield f"data: {error_data}\n\n"
             yield "data: [DONE]\n\n"
 
-    def _convert_to_gemini_format(self, messages: list[ChatMessage]) -> list[dict]:
+    def _convert_to_gemini_format(self, messages: list[ChatMessage]) -> list[types.Content]:
         """
         Convert OpenAI-style messages to Gemini format.
         
@@ -118,7 +118,7 @@ class GenerationService:
         - System messages become part of the first user message
         - Messages are grouped into user/model turns
         """
-        gemini_contents = []
+        gemini_contents: list[types.Content] = []
         system_prompt = None
 
         # Extract system prompt if present
@@ -140,6 +140,11 @@ class GenerationService:
                 system_prompt = None  # Only prepend once
 
             role = "user" if msg.role == "user" else "model"
-            gemini_contents.append({"role": role, "parts": [content]})
+            gemini_contents.append(
+                types.Content(
+                    role=role,
+                    parts=[types.Part.from_text(text=content)],
+                )
+            )
 
         return gemini_contents
