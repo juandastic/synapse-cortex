@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI):
         embedder=GeminiEmbedder(
             config=GeminiEmbedderConfig(
                 api_key=settings.google_api_key,
-                embedding_model="text-embedding-004",
+                embedding_model="gemini-embedding-001",
             )
         ),
         cross_encoder=GeminiRerankerClient(
