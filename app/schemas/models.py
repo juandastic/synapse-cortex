@@ -115,6 +115,51 @@ class HydrateResponse(BaseModel):
 
 
 # =============================================================================
+# Graph Explorer Models (Memory Visualization & Correction)
+# =============================================================================
+
+
+class GraphNode(BaseModel):
+    """A node in the knowledge graph visualization."""
+
+    id: str = Field(..., description="Unique node identifier (entity name)")
+    name: str = Field(..., description="Display name for the node")
+    val: int = Field(..., description="Number of connections (controls node size)")
+    summary: str = Field(..., description="Entity summary from Graphiti")
+
+
+class GraphLink(BaseModel):
+    """A link (edge) in the knowledge graph visualization."""
+
+    source: str = Field(..., description="Source node ID")
+    target: str = Field(..., description="Target node ID")
+    label: str = Field(..., description="Relationship type (e.g. RELATES_TO)")
+    fact: str | None = Field(default=None, description="Fact associated with the relationship")
+
+
+class GraphResponse(BaseModel):
+    """Response body for the GET /v1/graph/{group_id} endpoint."""
+
+    nodes: list[GraphNode]
+    links: list[GraphLink]
+
+
+class GraphCorrectionRequest(BaseModel):
+    """Request body for the POST /v1/graph/correction endpoint."""
+
+    group_id: str = Field(..., description="User/group ID whose memory to correct")
+    correction_text: str = Field(..., description="Natural language correction to apply")
+
+
+class GraphCorrectionResponse(BaseModel):
+    """Response body for the POST /v1/graph/correction endpoint."""
+
+    success: bool
+    error: str | None = None
+    code: str | None = None
+
+
+# =============================================================================
 # Health Check Models
 # =============================================================================
 

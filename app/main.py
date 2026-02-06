@@ -18,6 +18,7 @@ from neo4j import AsyncGraphDatabase
 from app.api.routes import router
 from app.core.config import get_settings
 from app.services.generation import GenerationService
+from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
 
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
     hydration_service = HydrationService(neo4j_driver)
     ingestion_service = IngestionService(graphiti, hydration_service, settings.graphiti_model)
     generation_service = GenerationService(settings.google_api_key)
+    graph_service = GraphService(neo4j_driver, graphiti)
 
     # Store in app state for dependency injection
     app.state.neo4j_driver = neo4j_driver
@@ -96,6 +98,7 @@ async def lifespan(app: FastAPI):
     app.state.hydration_service = hydration_service
     app.state.ingestion_service = ingestion_service
     app.state.generation_service = generation_service
+    app.state.graph_service = graph_service
 
     logger.info("Synapse Cortex started successfully")
 

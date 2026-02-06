@@ -7,6 +7,7 @@ Cognitive backend for the Synapse AI Chat application. A stateless REST API that
 - **Unified Ingest**: Process chat sessions via Graphiti and return updated user knowledge compilation
 - **Chat Completions**: OpenAI-compatible streaming responses using Google Gemini
 - **Knowledge Graph**: Neo4j-backed long-term memory with intelligent hydration
+- **Embeddings**: Powered by Google's `gemini-embedding-001` model (3072 dimensions)
 
 ## Quick Start
 
@@ -156,15 +157,16 @@ docker-compose down
 
 ## API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/ingest` | POST | Process session messages and return user knowledge compilation |
-| `/v1/chat/completions` | POST | OpenAI-compatible streaming chat completions |
-| `/health` | GET | Health check endpoint |
-
-## Authentication
-
 All endpoints (except `/health`) require an `X-API-SECRET` header matching the configured `SYNAPSE_API_SECRET`.
+
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | No | Health check for load balancers and monitoring |
+| `/ingest` | POST | Yes | Process a chat session into the knowledge graph and return updated user knowledge compilation |
+| `/hydrate` | POST | Yes | Read-only fetch of the current user knowledge compilation (no new data processing) |
+| `/v1/chat/completions` | POST | Yes | OpenAI-compatible streaming chat completions via SSE |
+| `/v1/graph/{group_id}` | GET | Yes | Retrieve the knowledge graph in react-force-graph format (nodes + links) |
+| `/v1/graph/correction` | POST | Yes | Apply a natural language memory correction through Graphiti's pipeline |
 
 ## Architecture
 

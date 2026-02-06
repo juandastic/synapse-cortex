@@ -10,11 +10,15 @@ from fastapi.responses import StreamingResponse
 from app.api.dependencies import (
     ApiKeyDep,
     GenerationServiceDep,
+    GraphServiceDep,
     HydrationServiceDep,
     IngestionServiceDep,
 )
 from app.schemas.models import (
     ChatCompletionRequest,
+    GraphCorrectionRequest,
+    GraphCorrectionResponse,
+    GraphResponse,
     HealthResponse,
     HydrateRequest,
     HydrateResponse,
@@ -110,3 +114,65 @@ async def chat_completions(
             "X-Accel-Buffering": "no",  # Disable nginx buffering
         },
     )
+
+
+@router.get("/v1/graph/{group_id}", response_model=GraphResponse, tags=["Graph"])
+async def get_graph(
+    group_id: str,
+    _api_key: ApiKeyDep,
+    graph_service: GraphServiceDep,
+) -> GraphResponse:
+    """
+    Retrieve the knowledge graph for a user in react-force-graph format.
+
+    Returns nodes (entities) and links (relationships) suitable for
+    rendering with react-force-graph-2d. Each node includes a `val` field
+    representing its connection count for automatic visual sizing.
+
+    Only returns currently valid relationships (non-expired) and excludes
+    Episodic nodes.
+
+    Requires X-API-SECRET header for authentication.
+    """
+    return await graph_service.get_graph(group_id)
+
+
+@router.post(
+    "/v1/graph/correction",
+    response_model=GraphCorrectionResponse,
+    tags=["Graph"],
+)
+async def correct_memory(
+    request: GraphCorrectionRequest,
+    _api_key: ApiKeyDep,
+    graph_service: GraphServiceDep,
+) -> GraphCorrectionResponse:
+    """
+    Apply a natural language memory correction via Graphiti.
+
+    Instead of direct CRUD operations on graph nodes (which would break
+    embeddings and temporal integrity), this endpoint feeds the correction
+    text through Graphiti's add_episode pipeline. Graphiti will automatically
+    invalidate outdated edges and create new ones.
+
+    Example correction: "Ya no quiero aplicar a la Visa O-1, decidí quedarme
+    en Colombia por ahora."
+
+    Requires X-API-SECRET header for authentication.
+    """
+    try:
+        await graph_service.correct_memory(
+            group_id=request.group_id,
+            correction_text=request.correction_text,
+        )
+        return GraphCorrectionResponse(success=True)
+    except Exception as e:
+        logger.error(
+            f"Error correcting memory for group {request.group_id}: {e}",
+            exc_info=True,
+        )
+        return GraphCorrectionResponse(
+            success=False,
+            error=str(e),
+            code="MEMORY_CORRECTION_ERROR",
+        )

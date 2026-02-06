@@ -8,6 +8,7 @@ from fastapi import Depends, Request
 
 from app.core.security import verify_api_key
 from app.services.generation import GenerationService
+from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
 
@@ -31,7 +32,13 @@ def get_generation_service(request: Request) -> GenerationService:
     return request.app.state.generation_service
 
 
+def get_graph_service(request: Request) -> GraphService:
+    """Get the graph service from app state."""
+    return request.app.state.graph_service
+
+
 # Type aliases for service dependencies
 HydrationServiceDep = Annotated[HydrationService, Depends(get_hydration_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
+GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
