@@ -1,6 +1,6 @@
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Discriminator, Field, Tag
 
 
 # =============================================================================
@@ -54,11 +54,38 @@ class IngestResponse(BaseModel):
 # =============================================================================
 
 
+class TextContentPart(BaseModel):
+    """A text content part in a multimodal message."""
+
+    type: Literal["text"]
+    text: str
+
+
+class ImageUrlData(BaseModel):
+    """Image URL data."""
+
+    url: str
+
+
+class ImageUrlContentPart(BaseModel):
+    """An image_url content part in a multimodal message."""
+
+    type: Literal["image_url"]
+    image_url: ImageUrlData
+
+
+ContentPart = Annotated[
+    Annotated[TextContentPart, Tag("text")]
+    | Annotated[ImageUrlContentPart, Tag("image_url")],
+    Discriminator("type"),
+]
+
+
 class ChatMessage(BaseModel):
     """A message in the chat completion request."""
 
     role: Literal["system", "user", "assistant"]
-    content: str
+    content: str | list[ContentPart]
 
 
 class ChatCompletionRequest(BaseModel):

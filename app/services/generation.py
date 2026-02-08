@@ -11,6 +11,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -48,7 +49,7 @@ class GenerationService:
 
         try:
             # Convert messages to Gemini format
-            gemini_contents = self._convert_to_gemini_format(request.messages)
+            gemini_contents = await self._convert_to_gemini_format(request.messages)
 
             # Stream the first chunk with role
             first_chunk = ChatCompletionChunk(
@@ -110,21 +111,58 @@ class GenerationService:
             yield f"data: {error_data}\n\n"
             yield "data: [DONE]\n\n"
 
-    def _convert_to_gemini_format(self, messages: list[ChatMessage]) -> list[types.Content]:
+    async def _download_image(self, url: str) -> tuple[bytes, str]:
+        """
+        Download image from a URL and return (bytes, mime_type).
+
+        Uses the Content-Type response header to detect MIME type,
+        falling back to image/jpeg if unavailable.
+        """
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            mime_type = response.headers.get("content-type", "image/jpeg").split(";")[0]
+            return response.content, mime_type
+
+    async def _build_parts(self, content: str | list) -> list[types.Part]:
+        """
+        Convert a message's content (string or multimodal array) into
+        a list of Gemini Part objects.
+        """
+        if isinstance(content, str):
+            return [types.Part.from_text(text=content)]
+
+        parts: list[types.Part] = []
+        for item in content:
+            if item.type == "text":
+                parts.append(types.Part.from_text(text=item.text))
+            elif item.type == "image_url":
+                image_bytes, mime_type = await self._download_image(
+                    item.image_url.url
+                )
+                parts.append(
+                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
+                )
+        return parts
+
+    async def _convert_to_gemini_format(
+        self, messages: list[ChatMessage]
+    ) -> list[types.Content]:
         """
         Convert OpenAI-style messages to Gemini format.
-        
+
         Gemini uses a different format:
         - System messages become part of the first user message
         - Messages are grouped into user/model turns
+        - Multimodal content arrays are converted to multiple Part objects
         """
         gemini_contents: list[types.Content] = []
-        system_prompt = None
+        system_prompt: str | None = None
 
-        # Extract system prompt if present
+        # Extract system prompt if present (always a string)
         for msg in messages:
             if msg.role == "system":
-                system_prompt = msg.content
+                system_prompt = msg.content if isinstance(msg.content, str) else None
                 break
 
         # Build conversation history
@@ -132,19 +170,16 @@ class GenerationService:
             if msg.role == "system":
                 continue
 
-            content = msg.content
+            parts = await self._build_parts(msg.content)
 
             # Prepend system prompt to first user message
             if msg.role == "user" and system_prompt and not gemini_contents:
-                content = f"{system_prompt}\n\n{content}"
+                parts.insert(0, types.Part.from_text(text=system_prompt))
                 system_prompt = None  # Only prepend once
 
             role = "user" if msg.role == "user" else "model"
             gemini_contents.append(
-                types.Content(
-                    role=role,
-                    parts=[types.Part.from_text(text=content)],
-                )
+                types.Content(role=role, parts=parts)
             )
 
         return gemini_contents
