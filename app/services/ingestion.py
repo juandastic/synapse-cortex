@@ -7,6 +7,7 @@ Combines:
 """
 
 import logging
+import time
 from datetime import datetime
 
 from graphiti_core import Graphiti
@@ -63,7 +64,8 @@ class IngestionService:
 
             logger.info(f"Adding episode {episode_name} for user {request.userId}")
 
-            await self.graphiti.add_episode(
+            start_time = time.monotonic()
+            result = await self.graphiti.add_episode(
                 name=episode_name,
                 episode_body=episode_content,
                 source=EpisodeType.message,
@@ -73,6 +75,7 @@ class IngestionService:
                     request.metadata.sessionEndedAt / 1000
                 ),
             )
+            elapsed_ms = (time.monotonic() - start_time) * 1000
 
             # Hydrate: Build updated userKnowledgeCompilation
             compilation = await self.hydration_service.build_user_knowledge(
@@ -81,13 +84,21 @@ class IngestionService:
 
             logger.info(
                 f"Successfully processed session {request.sessionId} "
-                f"for user {request.userId}"
+                f"for user {request.userId} "
+                f"({len(result.nodes)} nodes, {len(result.edges)} edges, "
+                f"{elapsed_ms:.0f}ms)"
             )
 
             return IngestResponse(
                 success=True,
                 userKnowledgeCompilation=compilation,
-                metadata=IngestResponseMetadata(model=self.model),
+                metadata=IngestResponseMetadata(
+                    model=self.model,
+                    processing_time_ms=round(elapsed_ms, 1),
+                    nodes_extracted=len(result.nodes),
+                    edges_extracted=len(result.edges),
+                    episode_id=result.episode.uuid,
+                ),
             )
 
         except Exception as e:

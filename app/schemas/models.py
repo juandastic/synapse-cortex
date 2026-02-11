@@ -37,6 +37,10 @@ class IngestResponseMetadata(BaseModel):
     """Metadata about the ingestion processing."""
 
     model: str = Field(..., description="Gemini model used for ingestion")
+    processing_time_ms: float | None = Field(default=None, description="Wall-clock time for Graphiti processing")
+    nodes_extracted: int | None = Field(default=None, description="Number of entity nodes extracted")
+    edges_extracted: int | None = Field(default=None, description="Number of entity edges extracted")
+    episode_id: str | None = Field(default=None, description="UUID of the created episode")
 
 
 class IngestResponse(BaseModel):
@@ -111,6 +115,16 @@ class ChatCompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class UsageData(BaseModel):
+    """Token usage statistics for a generation request (OpenAI-compatible)."""
+
+    prompt_tokens: int = Field(..., description="Tokens in the input prompt")
+    completion_tokens: int = Field(..., description="Tokens in the generated response")
+    total_tokens: int = Field(..., description="Total tokens (prompt + completion)")
+    thoughts_tokens: int | None = Field(default=None, description="Thinking tokens (Gemini 2.5+ models)")
+    cached_tokens: int | None = Field(default=None, description="Tokens served from cache")
+
+
 class ChatCompletionChunk(BaseModel):
     """A single chunk in a streaming chat completion response."""
 
@@ -119,6 +133,7 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChatCompletionChoice]
+    usage: UsageData | None = None
 
 
 # =============================================================================

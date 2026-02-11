@@ -21,6 +21,7 @@ from app.schemas.models import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatMessage,
+    UsageData,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,11 +67,18 @@ class GenerationService:
             )
             yield f"data: {first_chunk.model_dump_json()}\n\n"
 
+            # Track usage_metadata across chunks (fully populated on last chunk)
+            usage_metadata = None
+
             # Use async client for true async streaming
             async for chunk in await self._client.aio.models.generate_content_stream(
                 model=request.model,
                 contents=gemini_contents,
             ):
+                # Capture usage_metadata from each chunk; the last one is definitive
+                if chunk.usage_metadata:
+                    usage_metadata = chunk.usage_metadata
+
                 if chunk.text:
                     content_chunk = ChatCompletionChunk(
                         id=completion_id,
@@ -86,7 +94,18 @@ class GenerationService:
                     )
                     yield f"data: {content_chunk.model_dump_json()}\n\n"
 
-            # Send final chunk with finish_reason
+            # Build usage data from the final chunk's metadata
+            usage_data = None
+            if usage_metadata:
+                usage_data = UsageData(
+                    prompt_tokens=usage_metadata.prompt_token_count or 0,
+                    completion_tokens=usage_metadata.candidates_token_count or 0,
+                    total_tokens=usage_metadata.total_token_count or 0,
+                    thoughts_tokens=getattr(usage_metadata, "thoughts_token_count", None),
+                    cached_tokens=getattr(usage_metadata, "cached_content_token_count", None),
+                )
+
+            # Send final chunk with finish_reason and usage
             final_chunk = ChatCompletionChunk(
                 id=completion_id,
                 created=created,
@@ -98,6 +117,7 @@ class GenerationService:
                         finish_reason="stop",
                     )
                 ],
+                usage=usage_data,
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
 
