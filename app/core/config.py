@@ -25,6 +25,14 @@ class Settings(BaseSettings):
     # Default is 10. Reduce to 3-5 if you encounter rate limiting issues.
     semaphore_limit: int = 3
 
+    # Axiom / OpenTelemetry (optional, tracing disabled if token is empty)
+    # AXIOM_DOMAIN: base domain of your edge deployment (Settings > General in Axiom).
+    # US East 1: us-east-1.aws.edge.axiom.co | EU: eu-central-1.aws.edge.axiom.co
+    axiom_api_token: str = ""
+    axiom_dataset: str = "synapse-cortex-traces"
+    axiom_domain: str = "us-east-1.aws.edge.axiom.co"
+    otel_service_name: str = "synapse-cortex"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

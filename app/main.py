@@ -17,6 +17,7 @@ from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
 from app.core.config import get_settings
+from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
@@ -108,6 +109,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Synapse Cortex...")
     await neo4j_driver.close()
     await graphiti.close()
+    shutdown_telemetry()
     logger.info("Synapse Cortex shutdown complete")
 
 
@@ -130,3 +132,6 @@ app.add_middleware(
 
 # Include API routes
 app.include_router(router)
+
+# OpenTelemetry instrumentation (after app is fully configured)
+setup_telemetry(app)

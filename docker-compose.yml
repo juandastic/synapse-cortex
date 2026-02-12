@@ -36,6 +36,9 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - SYNAPSE_API_SECRET=${SYNAPSE_API_SECRET}
       - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-3}
+      - AXIOM_API_TOKEN=${AXIOM_API_TOKEN}
+      - AXIOM_DATASET=${AXIOM_DATASET:-synapse-cortex-traces}
+      - AXIOM_DOMAIN=${AXIOM_DOMAIN:-us-east-1.aws.edge.axiom.co}
     depends_on:
       neo4j:
         condition: service_healthy
