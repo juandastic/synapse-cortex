@@ -164,22 +164,28 @@ The system is built on [Graphiti](https://github.com/getzep/graphiti), a tempora
 ## Backend Components
 
 ### 1. **Ingestion Service** (`app/services/ingestion.py`)
-**Purpose**: Process chat sessions into the knowledge graph
+**Purpose**: Process chat sessions into the knowledge graph (async fire-and-forget)
 
 **Key Functions**:
+- `accept_session()`: Validates, creates job entry, launches background task, returns 202 immediately
+- `_process_background()`: Runs `graphiti.add_episode()` asynchronously; updates job store on completion
 - Validates sessions (minimum message count, character threshold)
 - Formats messages into Graphiti episode format
-- Calls `graphiti.add_episode()` to extract entities/relationships
-- Returns updated user knowledge compilation via Hydration Service
 
 **Data Flow**:
 ```
-Chat Session → Validation → Format → Graphiti.add_episode() → Hydration → Response
+POST /ingest → Validation → Create Job → 202 Accepted
+                    │
+                    └─▶ Background: Graphiti.add_episode() → Update job store
+
+GET /ingest/status/{jobId} → Poll until completed → Hydrate on-demand from Neo4j → Return compilation
 ```
 
 **Validation Rules**:
 - Minimum 1 message
 - Minimum 5 total characters
+
+**Job Store** (`app/services/job_store.py`): In-memory dict tracks job status. Compilation is fetched from Neo4j on-demand when status is `"completed"`, then the job is cleaned from memory. Requires `WEB_CONCURRENCY=1` (single worker).
 
 ### 2. **Hydration Service** (`app/services/hydration.py`)
 **Purpose**: Build user knowledge compilations from the graph
@@ -263,11 +269,13 @@ All endpoints (except `/health`) require an `X-API-SECRET` header matching `SYNA
 ---
 
 #### 📥 `POST /ingest`
-**Purpose**: Process a completed chat session into the knowledge graph  
+**Purpose**: Accept a chat session for async processing (fire-and-forget)  
 **Auth**: ✅ Required (`X-API-SECRET`)  
+**Status**: `202 Accepted`  
 **Request Body**:
 ```json
 {
+  "jobId": "convex-queue-id-abc123",
   "userId": "user-123",
   "sessionId": "session-abc",
   "messages": [
@@ -290,22 +298,63 @@ All endpoints (except `/health`) require an `X-API-SECRET` header matching `SYNA
 }
 ```
 
-**Response**:
+**Response** (202):
 ```json
 {
-  "success": true,
+  "jobId": "convex-queue-id-abc123",
+  "status": "processing"
+}
+```
+
+**Skipped** (insufficient messages): returns immediately with `status: "skipped"` and `userKnowledgeCompilation`.
+
+**Duplicate submit** (same `jobId`): returns current status without re-processing.
+
+**Client Flow**: Poll `GET /ingest/status/{jobId}` until `status` is `"completed"` or `"failed"`.
+
+---
+
+#### 📊 `GET /ingest/status/{job_id}`
+**Purpose**: Poll for ingest job status and retrieve result when completed  
+**Auth**: ✅ Required (`X-API-SECRET`)  
+
+**Response** (processing):
+```json
+{
+  "jobId": "convex-queue-id-abc123",
+  "status": "processing"
+}
+```
+
+**Response** (completed):
+```json
+{
+  "jobId": "convex-queue-id-abc123",
+  "status": "completed",
   "userKnowledgeCompilation": "#### 1. CONCEPTUAL DEFINITIONS & IDENTITY ####\n- **Spain**: Country user plans to move to...",
   "metadata": {
-    "model": "gemini-3-flash-preview"
+    "model": "gemini-3-flash-preview",
+    "processing_time_ms": 15000.5,
+    "nodes_extracted": 8,
+    "edges_extracted": 12,
+    "episode_id": "uuid-..."
   }
 }
 ```
 
-**Processing Steps**:
-1. Validate session (min messages, min characters)
-2. Call `graphiti.add_episode()` to extract entities/relationships
-3. Build updated user knowledge compilation
-4. Return compilation to client
+**Response** (failed):
+```json
+{
+  "jobId": "convex-queue-id-abc123",
+  "status": "failed",
+  "error": "Error message",
+  "code": "GRAPH_PROCESSING_ERROR"
+}
+```
+
+**404**: Job not found (never submitted, already cleaned up, or backend restarted).
+
+**Note**: When returning a terminal state (`"completed"` or `"failed"`), the job is removed from memory. Compilation is hydrated from Neo4j on-demand for completed jobs.
 
 ---
 
@@ -426,36 +475,40 @@ data: [DONE]
 
 ## Data Flow
 
-### Ingestion Pipeline
+### Ingestion Pipeline (Async with Polling)
 
 ```
-1. CLIENT
+1. CLIENT (Convex)
    └─▶ POST /ingest
-       {userId, sessionId, messages, metadata}
+       {jobId, userId, sessionId, messages, metadata}
 
-2. INGESTION SERVICE
+2. INGESTION SERVICE (accept_session)
    ├─▶ Validate session (min messages, min chars)
-   ├─▶ Format messages for Graphiti
-   │   "User: I love hiking\nAssistant: That's great!"
-   └─▶ Call graphiti.add_episode()
+   ├─▶ If insufficient: return 202 {status: "skipped", userKnowledgeCompilation} (hydrate immediately)
+   ├─▶ If duplicate jobId: return 202 {status: "processing"} (no re-process)
+   ├─▶ Create job in memory store (status: "processing")
+   ├─▶ asyncio.create_task(_process_background)
+   └─▶ Return 202 {jobId, status: "processing"}
 
-3. GRAPHITI CORE
-   ├─▶ Extract entities (e.g., "hiking", "User")
-   ├─▶ Extract relationships (e.g., User ENJOYS hiking)
-   ├─▶ Generate embeddings (gemini-embedding-001)
-   ├─▶ Search for existing similar entities
-   ├─▶ Merge duplicates (entity resolution)
-   ├─▶ Rerank candidates (Gemini reranker)
-   └─▶ Write to Neo4j (nodes + edges + timestamps)
+3. BACKGROUND TASK (_process_background)
+   └─▶ GRAPHITI CORE
+       ├─▶ Extract entities (e.g., "hiking", "User")
+       ├─▶ Extract relationships (e.g., User ENJOYS hiking)
+       ├─▶ Generate embeddings (gemini-embedding-001)
+       ├─▶ Search for existing similar entities
+       ├─▶ Merge duplicates (entity resolution)
+       ├─▶ Rerank candidates (Gemini reranker)
+       └─▶ Write to Neo4j (nodes + edges + timestamps)
+   └─▶ Update job store: status "completed" + metadata (no compilation stored)
 
-4. HYDRATION SERVICE
-   ├─▶ Cypher: Fetch entities with degree ≥ 2
-   ├─▶ Cypher: Fetch valid relationships
-   ├─▶ Format compilation (definitions + dynamics)
-   └─▶ Return to client
-
-5. CLIENT
-   └─▶ Receives updated userKnowledgeCompilation
+4. CLIENT (Polling loop, e.g. exponential backoff: 2m, 5m, 10m, 30m)
+   └─▶ GET /ingest/status/{jobId}
+       ├─▶ 404: job not found → re-submit POST /ingest
+       ├─▶ {status: "processing"} → poll again
+       └─▶ {status: "completed"} → HYDRATION SERVICE
+           ├─▶ Hydrate on-demand from Neo4j (~1-2s)
+           ├─▶ Remove job from memory
+           └─▶ Return full result to client
 ```
 
 ### Chat Completion Pipeline

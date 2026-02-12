@@ -4,8 +4,9 @@ API Routes - Endpoint definitions for Synapse Cortex.
 
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
+from opentelemetry import trace
 
 from app.api.dependencies import (
     ApiKeyDep,
@@ -22,9 +23,11 @@ from app.schemas.models import (
     HealthResponse,
     HydrateRequest,
     HydrateResponse,
+    IngestAcceptedResponse,
     IngestRequest,
-    IngestResponse,
+    IngestStatusResponse,
 )
+from app.services.job_store import get_job, remove_job
 
 logger = logging.getLogger(__name__)
 
@@ -41,23 +44,103 @@ async def health_check() -> HealthResponse:
     return HealthResponse()
 
 
-@router.post("/ingest", response_model=IngestResponse, tags=["Ingest"])
+@router.post(
+    "/ingest",
+    response_model=IngestAcceptedResponse,
+    status_code=202,
+    tags=["Ingest"],
+)
 async def ingest_session(
     request: IngestRequest,
     _api_key: ApiKeyDep,
     ingestion_service: IngestionServiceDep,
-) -> IngestResponse:
+) -> IngestAcceptedResponse:
     """
-    Process a completed chat session into the knowledge graph.
+    Accept a chat session for async processing (fire-and-forget).
     
-    This endpoint:
-    1. Validates the session meets minimum requirements
-    2. Processes messages via Graphiti to extract entities/relationships
-    3. Returns the updated user knowledge compilation
+    Returns 202 immediately with jobId and status. Poll GET /ingest/status/{jobId}
+    to check completion. If messages are insufficient, returns "skipped" with
+    compilation immediately.
     
     Requires X-API-SECRET header for authentication.
     """
-    return await ingestion_service.process_session(request)
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute("ingest.job_id", request.jobId)
+        span.set_attribute("ingest.user_id", request.userId)
+        span.set_attribute("ingest.session_id", request.sessionId)
+    return await ingestion_service.accept_session(request)
+
+
+@router.get(
+    "/ingest/status/{job_id}",
+    response_model=IngestStatusResponse,
+    tags=["Ingest"],
+)
+async def ingest_status(
+    job_id: str,
+    _api_key: ApiKeyDep,
+    hydration_service: HydrationServiceDep,
+) -> IngestStatusResponse:
+    """
+    Poll for ingest job status. Returns full result when completed.
+    
+    When status is "completed", hydrates compilation from Neo4j on-demand and
+    removes the job from memory. When "failed", returns error details and
+    removes the job. Returns 404 if job not found.
+    
+    Requires X-API-SECRET header for authentication.
+    """
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute("ingest.job_id", job_id)
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if span.is_recording():
+        span.set_attribute("ingest.user_id", job.user_id)
+        span.set_attribute("ingest.session_id", job.session_id)
+        span.set_attribute("ingest.status", job.status)
+
+    if job.status == "processing":
+        return IngestStatusResponse(jobId=job_id, status="processing")
+
+    if job.status == "completed":
+        # Hydrate on-demand from Neo4j
+        compilation = await hydration_service.build_user_knowledge(job.user_id)
+        metadata = None
+        if (
+            job.model is not None
+            or job.processing_time_ms is not None
+            or job.nodes_extracted is not None
+            or job.edges_extracted is not None
+            or job.episode_id is not None
+        ):
+            from app.schemas.models import IngestResponseMetadata
+
+            metadata = IngestResponseMetadata(
+                model=job.model or "unknown",
+                processing_time_ms=job.processing_time_ms,
+                nodes_extracted=job.nodes_extracted,
+                edges_extracted=job.edges_extracted,
+                episode_id=job.episode_id,
+            )
+        remove_job(job_id)
+        return IngestStatusResponse(
+            jobId=job_id,
+            status="completed",
+            userKnowledgeCompilation=compilation,
+            metadata=metadata,
+        )
+
+    # job.status == "failed"
+    remove_job(job_id)
+    return IngestStatusResponse(
+        jobId=job_id,
+        status="failed",
+        error=job.error,
+        code=job.code,
+    )
 
 
 @router.post("/hydrate", response_model=HydrateResponse, tags=["Debug"])

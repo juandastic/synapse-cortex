@@ -14,3 +14,6 @@ COPY ./app /app/app
 # Configure the application module
 ENV MODULE_NAME="app.main"
 ENV VARIABLE_NAME="app"
+
+# Single worker so in-memory job store is shared across all requests
+ENV WEB_CONCURRENCY=1

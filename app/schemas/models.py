@@ -27,6 +27,7 @@ class IngestMetadata(BaseModel):
 class IngestRequest(BaseModel):
     """Request body for the /ingest endpoint."""
 
+    jobId: str = Field(..., description="Convex queue table _id for async tracking")
     userId: str
     sessionId: str
     messages: list[IngestMessage]
@@ -44,9 +45,29 @@ class IngestResponseMetadata(BaseModel):
 
 
 class IngestResponse(BaseModel):
-    """Response body for the /ingest endpoint."""
+    """Response body for the /ingest endpoint (legacy sync flow)."""
 
     success: bool
+    userKnowledgeCompilation: str | None = None
+    metadata: IngestResponseMetadata | None = None
+    error: str | None = None
+    code: str | None = None
+
+
+class IngestAcceptedResponse(BaseModel):
+    """202 response for POST /ingest (async fire-and-forget)."""
+
+    jobId: str
+    status: Literal["processing", "skipped"]
+    # If skipped (insufficient messages), include compilation immediately
+    userKnowledgeCompilation: str | None = None
+
+
+class IngestStatusResponse(BaseModel):
+    """Response for GET /ingest/status/{job_id}."""
+
+    jobId: str
+    status: Literal["processing", "completed", "failed"]
     userKnowledgeCompilation: str | None = None
     metadata: IngestResponseMetadata | None = None
     error: str | None = None
