@@ -588,7 +588,7 @@ data: [DONE]
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 neo4j>=5.17.0
-graphiti-core[google-genai]>=0.3.0
+graphiti-core[google-genai]>=0.27.1
 google-genai>=1.0.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
