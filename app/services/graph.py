@@ -7,12 +7,21 @@ Provides:
 """
 
 import logging
+import time
 from datetime import datetime
 
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
 from neo4j import AsyncDriver
+from opentelemetry import trace
 
+from app.core.observability import (
+    anonymize_id,
+    classify_error,
+    mark_span_error,
+    mark_span_success,
+    set_span_attributes,
+)
 from app.schemas.models import GraphLink, GraphNode, GraphResponse
 
 logger = logging.getLogger(__name__)
@@ -59,10 +68,29 @@ class GraphService:
         Returns:
             GraphResponse with nodes and links ready for react-force-graph-2d.
         """
-        nodes = await self._fetch_nodes(group_id)
-        links = await self._fetch_links(group_id)
-
-        return GraphResponse(nodes=nodes, links=links)
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "graph.get_graph",
+            attributes={"graph.group_id": anonymize_id(group_id)},
+        ) as span:
+            start = time.monotonic()
+            try:
+                nodes = await self._fetch_nodes(group_id)
+                links = await self._fetch_links(group_id)
+                set_span_attributes(
+                    span,
+                    {
+                        "graph.nodes_count": len(nodes),
+                        "graph.links_count": len(links),
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
+                mark_span_success(span)
+                return GraphResponse(nodes=nodes, links=links)
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(span, e, category=category, code=code)
+                raise
 
     async def correct_memory(self, group_id: str, correction_text: str) -> None:
         """
@@ -75,63 +103,143 @@ class GraphService:
             group_id: The user/group ID whose memory to correct.
             correction_text: Natural language correction from the user.
         """
-        logger.info(f"Applying memory correction for group {group_id}")
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "graph.correct_memory",
+            attributes={
+                "graph.correction.group_id": anonymize_id(group_id),
+                "graph.correction.text_length_chars": len(correction_text),
+            },
+        ) as span:
+            start = time.monotonic()
+            try:
+                logger.info(f"Applying memory correction for group {group_id}")
 
-        await self.graphiti.add_episode(
-            name="user_memory_correction",
-            episode_body=correction_text,
-            source=EpisodeType.text,
-            source_description="User-initiated memory correction via Memory Explorer",
-            group_id=group_id,
-            reference_time=datetime.now(),
-        )
+                await self.graphiti.add_episode(
+                    name="user_memory_correction",
+                    episode_body=correction_text,
+                    source=EpisodeType.text,
+                    source_description="User-initiated memory correction via Memory Explorer",
+                    group_id=group_id,
+                    reference_time=datetime.now(),
+                )
 
-        logger.info(f"Memory correction applied successfully for group {group_id}")
+                set_span_attributes(
+                    span,
+                    {
+                        "graph.correction.success": True,
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
+                mark_span_success(span)
+                logger.info(f"Memory correction applied successfully for group {group_id}")
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(
+                    span,
+                    e,
+                    category=category,
+                    code="GRAPH_CORRECTION_ERROR" if code == "UNEXPECTED_ERROR" else code,
+                    extra_attributes={
+                        "graph.correction.success": False,
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
+                raise
 
     async def _fetch_nodes(self, group_id: str) -> list[GraphNode]:
         """Fetch entity nodes with their connection count for visual sizing."""
-        async with self.driver.session() as session:
-            result = await session.run(
-                FETCH_GRAPH_NODES_QUERY,
-                group_id=group_id,
-            )
-            records = await result.data()
-
-        nodes = []
-        for record in records:
-            node_id = record.get("id", "")
-            name = record.get("name", "")
-            if node_id and name:
-                nodes.append(
-                    GraphNode(
-                        id=node_id,
-                        name=name,
-                        val=record.get("val", 1),
-                        summary=record.get("summary", ""),
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "db.cypher.fetch_graph_nodes",
+            attributes={
+                "db.system": "neo4j",
+                "db.query_type": "fetch_graph_nodes",
+                "graph.group_id": anonymize_id(group_id),
+            },
+        ) as span:
+            start = time.monotonic()
+            try:
+                async with self.driver.session() as session:
+                    result = await session.run(
+                        FETCH_GRAPH_NODES_QUERY,
+                        group_id=group_id,
                     )
-                )
-        return nodes
+                    records = await result.data()
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(span, e, category=category, code=code)
+                raise
+
+            nodes = []
+            for record in records:
+                node_id = record.get("id", "")
+                name = record.get("name", "")
+                if node_id and name:
+                    nodes.append(
+                        GraphNode(
+                            id=node_id,
+                            name=name,
+                            val=record.get("val", 1),
+                            summary=record.get("summary", ""),
+                        )
+                    )
+
+            set_span_attributes(
+                span,
+                {
+                    "db.records_returned": len(records),
+                    "graph.nodes_count": len(nodes),
+                    "db.query_duration_ms": round((time.monotonic() - start) * 1000, 2),
+                },
+            )
+            mark_span_success(span)
+            return nodes
 
     async def _fetch_links(self, group_id: str) -> list[GraphLink]:
         """Fetch valid relationships between entities."""
-        async with self.driver.session() as session:
-            result = await session.run(
-                FETCH_GRAPH_LINKS_QUERY,
-                group_id=group_id,
-            )
-            records = await result.data()
-
-        links = []
-        for record in records:
-            source = record.get("source", "")
-            target = record.get("target", "")
-            if source and target:
-                links.append(
-                    GraphLink(
-                        source=source,
-                        target=target,
-                        label=record.get("label", "RELATES_TO"),
-                        fact=record.get("fact"),
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "db.cypher.fetch_graph_links",
+            attributes={
+                "db.system": "neo4j",
+                "db.query_type": "fetch_graph_links",
+                "graph.group_id": anonymize_id(group_id),
+            },
+        ) as span:
+            start = time.monotonic()
+            try:
+                async with self.driver.session() as session:
+                    result = await session.run(
+                        FETCH_GRAPH_LINKS_QUERY,
+                        group_id=group_id,
                     )
-                )
-        return links
+                    records = await result.data()
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(span, e, category=category, code=code)
+                raise
+
+            links = []
+            for record in records:
+                source = record.get("source", "")
+                target = record.get("target", "")
+                if source and target:
+                    links.append(
+                        GraphLink(
+                            source=source,
+                            target=target,
+                            label=record.get("label", "RELATES_TO"),
+                            fact=record.get("fact"),
+                        )
+                    )
+            set_span_attributes(
+                span,
+                {
+                    "db.records_returned": len(records),
+                    "graph.links_count": len(links),
+                    "db.query_duration_ms": round((time.monotonic() - start) * 1000, 2),
+                },
+            )
+            mark_span_success(span)
+            return links

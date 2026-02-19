@@ -5,7 +5,18 @@ Uses direct Cypher queries (bypassing Graphiti) for performance.
 Implements degree-based filtering to prioritize well-connected entities.
 """
 
+import time
+
 from neo4j import AsyncDriver
+from opentelemetry import trace
+
+from app.core.observability import (
+    anonymize_id,
+    classify_error,
+    mark_span_error,
+    mark_span_success,
+    set_span_attributes,
+)
 
 # Default minimum connections for entity inclusion (filters long-tail noise)
 DEFAULT_MIN_DEGREE = 2
@@ -59,13 +70,48 @@ class HydrationService:
         Returns:
             A structured text compilation of the user's knowledge profile.
         """
-        definitions = await self._fetch_entity_definitions(user_id)
-        relationships = await self._fetch_relationships(user_id)
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "hydration.build_user_knowledge",
+            attributes={
+                "hydrate.user_id": anonymize_id(user_id),
+                "hydrate.min_degree": self.min_degree,
+            },
+        ) as span:
+            start = time.monotonic()
+            try:
+                definitions = await self._fetch_entity_definitions(user_id)
+                relationships = await self._fetch_relationships(user_id)
 
-        if not definitions and not relationships:
-            return ""
+                if not definitions and not relationships:
+                    set_span_attributes(
+                        span,
+                        {
+                            "hydrate.definitions_count": 0,
+                            "hydrate.relationships_count": 0,
+                            "hydrate.compilation_size_chars": 0,
+                            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                        },
+                    )
+                    mark_span_success(span)
+                    return ""
 
-        return self._format_compilation(definitions, relationships)
+                compilation = self._format_compilation(definitions, relationships)
+                set_span_attributes(
+                    span,
+                    {
+                        "hydrate.definitions_count": len(definitions),
+                        "hydrate.relationships_count": len(relationships),
+                        "hydrate.compilation_size_chars": len(compilation),
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
+                mark_span_success(span)
+                return compilation
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(span, e, category=category, code=code)
+                raise
 
     async def _fetch_entity_definitions(self, group_id: str) -> list[str]:
         """
@@ -74,21 +120,46 @@ class HydrationService:
         Only includes entities with at least min_degree connections,
         filtering out long-tail noise.
         """
-        async with self.driver.session() as session:
-            result = await session.run(
-                FETCH_ENTITIES_QUERY,
-                group_id=group_id,
-                min_degree=self.min_degree,
-            )
-            records = await result.data()
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "db.cypher.fetch_entities",
+            attributes={
+                "db.system": "neo4j",
+                "db.query_type": "fetch_entities",
+                "hydrate.group_id": anonymize_id(group_id),
+            },
+        ) as span:
+            start = time.monotonic()
+            try:
+                async with self.driver.session() as session:
+                    result = await session.run(
+                        FETCH_ENTITIES_QUERY,
+                        group_id=group_id,
+                        min_degree=self.min_degree,
+                    )
+                    records = await result.data()
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(span, e, category=category, code=code)
+                raise
 
-        lines = []
-        for record in records:
-            name = record.get("name", "")
-            summary = record.get("summary", "")
-            if name and summary:
-                lines.append(f"- **{name}**: {summary}")
-        return lines
+            lines = []
+            for record in records:
+                name = record.get("name", "")
+                summary = record.get("summary", "")
+                if name and summary:
+                    lines.append(f"- **{name}**: {summary}")
+
+            set_span_attributes(
+                span,
+                {
+                    "db.records_returned": len(records),
+                    "hydrate.definitions_count": len(lines),
+                    "db.query_duration_ms": round((time.monotonic() - start) * 1000, 2),
+                },
+            )
+            mark_span_success(span)
+            return lines
 
     async def _fetch_relationships(self, group_id: str) -> list[str]:
         """
@@ -96,42 +167,66 @@ class HydrationService:
 
         Returns formatted relationship lines including verb, fact, and timestamps.
         """
-        async with self.driver.session() as session:
-            result = await session.run(
-                FETCH_RELATIONSHIPS_QUERY,
-                group_id=group_id,
+        tracer = trace.get_tracer(__name__)
+        with tracer.start_as_current_span(
+            "db.cypher.fetch_relationships",
+            attributes={
+                "db.system": "neo4j",
+                "db.query_type": "fetch_relationships",
+                "hydrate.group_id": anonymize_id(group_id),
+            },
+        ) as span:
+            start = time.monotonic()
+            try:
+                async with self.driver.session() as session:
+                    result = await session.run(
+                        FETCH_RELATIONSHIPS_QUERY,
+                        group_id=group_id,
+                    )
+                    records = await result.data()
+            except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(span, e, category=category, code=code)
+                raise
+
+            lines = []
+            for record in records:
+                source = record.get("source_name", "")
+                target = record.get("target_name", "")
+                verb = self._format_relation_name(record.get("relation_name"))
+                fact = record.get("fact")
+                valid_at = record.get("valid_at")
+                invalid_at = record.get("invalid_at")
+
+                if not source or not target:
+                    continue
+
+                line = f"- {source} {verb} {target}"
+
+                if fact:
+                    line += f': "{fact}"'
+
+                # Add temporal context if available
+                temporal_parts = []
+                if valid_at:
+                    temporal_parts.append(f"valid_at: {valid_at}")
+                if invalid_at:
+                    temporal_parts.append(f"invalid_at: {invalid_at}")
+                if temporal_parts:
+                    line += f" [{', '.join(temporal_parts)}]"
+
+                lines.append(line)
+
+            set_span_attributes(
+                span,
+                {
+                    "db.records_returned": len(records),
+                    "hydrate.relationships_count": len(lines),
+                    "db.query_duration_ms": round((time.monotonic() - start) * 1000, 2),
+                },
             )
-            records = await result.data()
-
-        lines = []
-        for record in records:
-            source = record.get("source_name", "")
-            target = record.get("target_name", "")
-            verb = self._format_relation_name(record.get("relation_name"))
-            fact = record.get("fact")
-            valid_at = record.get("valid_at")
-            invalid_at = record.get("invalid_at")
-
-            if not source or not target:
-                continue
-
-            line = f"- {source} {verb} {target}"
-
-            if fact:
-                line += f': "{fact}"'
-
-            # Add temporal context if available
-            temporal_parts = []
-            if valid_at:
-                temporal_parts.append(f"valid_at: {valid_at}")
-            if invalid_at:
-                temporal_parts.append(f"invalid_at: {invalid_at}")
-            if temporal_parts:
-                line += f" [{', '.join(temporal_parts)}]"
-
-            lines.append(line)
-
-        return lines
+            mark_span_success(span)
+            return lines
 
     @staticmethod
     def _format_relation_name(name: str | None) -> str:

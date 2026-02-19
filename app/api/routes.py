@@ -3,6 +3,7 @@ API Routes - Endpoint definitions for Synapse Cortex.
 """
 
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -14,6 +15,13 @@ from app.api.dependencies import (
     GraphServiceDep,
     HydrationServiceDep,
     IngestionServiceDep,
+)
+from app.core.observability import (
+    anonymize_id,
+    classify_error,
+    mark_span_error,
+    mark_span_success,
+    set_span_attributes,
 )
 from app.schemas.models import (
     ChatCompletionRequest,
@@ -65,11 +73,32 @@ async def ingest_session(
     Requires X-API-SECRET header for authentication.
     """
     span = trace.get_current_span()
-    if span.is_recording():
-        span.set_attribute("ingest.job_id", request.jobId)
-        span.set_attribute("ingest.user_id", request.userId)
-        span.set_attribute("ingest.session_id", request.sessionId)
-    return await ingestion_service.accept_session(request)
+    set_span_attributes(
+        span,
+        {
+            "ingest.job_id": request.jobId,
+            "ingest.user_id": request.userId,
+            "ingest.session_id": request.sessionId,
+            "ingest.message_count": len(request.messages),
+            "ingest.total_chars": sum(len(m.content) for m in request.messages),
+        },
+    )
+    start = time.monotonic()
+    try:
+        response = await ingestion_service.accept_session(request)
+        set_span_attributes(
+            span,
+            {
+                "ingest.status": response.status,
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        mark_span_success(span, status="skipped" if response.status == "skipped" else "success")
+        return response
+    except Exception as e:
+        category, code = classify_error(e)
+        mark_span_error(span, e, category=category, code=code)
+        raise
 
 
 @router.get(
@@ -92,22 +121,40 @@ async def ingest_status(
     Requires X-API-SECRET header for authentication.
     """
     span = trace.get_current_span()
-    if span.is_recording():
-        span.set_attribute("ingest.job_id", job_id)
+    start = time.monotonic()
+    set_span_attributes(span, {"ingest.job_id": job_id})
     job = get_job(job_id)
     if job is None:
+        mark_span_error(
+            span,
+            HTTPException(status_code=404, detail="Job not found"),
+            category="validation",
+            code="INGEST_JOB_NOT_FOUND",
+            extra_attributes={"duration_ms": round((time.monotonic() - start) * 1000, 2)},
+        )
         raise HTTPException(status_code=404, detail="Job not found")
-    if span.is_recording():
-        span.set_attribute("ingest.user_id", job.user_id)
-        span.set_attribute("ingest.session_id", job.session_id)
-        span.set_attribute("ingest.status", job.status)
+    set_span_attributes(
+        span,
+        {
+            "ingest.user_id": job.user_id,
+            "ingest.session_id": job.session_id,
+            "ingest.status": job.status,
+        },
+    )
 
     if job.status == "processing":
+        set_span_attributes(span, {"duration_ms": round((time.monotonic() - start) * 1000, 2)})
+        mark_span_success(span)
         return IngestStatusResponse(jobId=job_id, status="processing")
 
     if job.status == "completed":
-        # Hydrate on-demand from Neo4j
-        compilation = await hydration_service.build_user_knowledge(job.user_id)
+        try:
+            # Hydrate on-demand from Neo4j
+            compilation = await hydration_service.build_user_knowledge(job.user_id)
+        except Exception as e:
+            category, code = classify_error(e)
+            mark_span_error(span, e, category=category, code=code)
+            raise
         metadata = None
         if (
             job.model is not None
@@ -125,7 +172,25 @@ async def ingest_status(
                 edges_extracted=job.edges_extracted,
                 episode_id=job.episode_id,
             )
+            set_span_attributes(
+                span,
+                {
+                    "ingest.metadata.model": metadata.model,
+                    "ingest.metadata.processing_time_ms": metadata.processing_time_ms,
+                    "ingest.metadata.nodes_extracted": metadata.nodes_extracted,
+                    "ingest.metadata.edges_extracted": metadata.edges_extracted,
+                    "ingest.metadata.episode_id": metadata.episode_id,
+                },
+            )
         remove_job(job_id)
+        set_span_attributes(
+            span,
+            {
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                "ingest.compilation_size_chars": len(compilation),
+            },
+        )
+        mark_span_success(span)
         return IngestStatusResponse(
             jobId=job_id,
             status="completed",
@@ -135,6 +200,14 @@ async def ingest_status(
 
     # job.status == "failed"
     remove_job(job_id)
+    set_span_attributes(
+        span,
+        {
+            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            "error.code": job.code or "INGEST_PROCESSING_ERROR",
+        },
+    )
+    mark_span_success(span, status="failed")
     return IngestStatusResponse(
         jobId=job_id,
         status="failed",
@@ -159,13 +232,36 @@ async def hydrate_user(
     
     Requires X-API-SECRET header for authentication.
     """
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(span, {"hydrate.user_id": anonymize_id(request.userId)})
     try:
         compilation = await hydration_service.build_user_knowledge(request.userId)
+        set_span_attributes(
+            span,
+            {
+                "hydrate.success": True,
+                "hydrate.compilation_size_chars": len(compilation),
+                "hydrate.duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        mark_span_success(span)
         return HydrateResponse(
             success=True,
             userKnowledgeCompilation=compilation,
         )
     except Exception as e:
+        category, code = classify_error(e)
+        mark_span_error(
+            span,
+            e,
+            category=category,
+            code="HYDRATION_ERROR" if code == "UNEXPECTED_ERROR" else code,
+            extra_attributes={
+                "hydrate.success": False,
+                "hydrate.duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
         logger.error(f"Error hydrating user {request.userId}: {e}", exc_info=True)
         return HydrateResponse(
             success=False,
@@ -188,6 +284,26 @@ async def chat_completions(
     
     Requires X-API-SECRET header for authentication.
     """
+    span = trace.get_current_span()
+    system_prompt_chars = 0
+    has_images = False
+    for msg in request.messages:
+        if msg.role == "system" and isinstance(msg.content, str):
+            system_prompt_chars += len(msg.content)
+        if isinstance(msg.content, list):
+            has_images = has_images or any(part.type == "image_url" for part in msg.content)
+
+    set_span_attributes(
+        span,
+        {
+            "chat.model": request.model,
+            "chat.stream": request.stream,
+            "chat.messages_count": len(request.messages),
+            "chat.system_prompt_chars": system_prompt_chars,
+            "chat.has_images": has_images,
+        },
+    )
+    mark_span_success(span)
     return StreamingResponse(
         generation_service.stream_chat_completion(request),
         media_type="text/event-stream",
@@ -217,7 +333,25 @@ async def get_graph(
 
     Requires X-API-SECRET header for authentication.
     """
-    return await graph_service.get_graph(group_id)
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(span, {"graph.group_id": anonymize_id(group_id)})
+    try:
+        response = await graph_service.get_graph(group_id)
+        set_span_attributes(
+            span,
+            {
+                "graph.nodes_count": len(response.nodes),
+                "graph.links_count": len(response.links),
+                "graph.duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        mark_span_success(span)
+        return response
+    except Exception as e:
+        category, code = classify_error(e)
+        mark_span_error(span, e, category=category, code=code)
+        raise
 
 
 @router.post(
@@ -243,13 +377,41 @@ async def correct_memory(
 
     Requires X-API-SECRET header for authentication.
     """
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(
+        span,
+        {
+            "graph.correction.group_id": anonymize_id(request.group_id),
+            "graph.correction.text_length_chars": len(request.correction_text),
+        },
+    )
     try:
         await graph_service.correct_memory(
             group_id=request.group_id,
             correction_text=request.correction_text,
         )
+        set_span_attributes(
+            span,
+            {
+                "graph.correction.success": True,
+                "graph.correction.duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        mark_span_success(span)
         return GraphCorrectionResponse(success=True)
     except Exception as e:
+        category, code = classify_error(e)
+        mark_span_error(
+            span,
+            e,
+            category=category,
+            code="MEMORY_CORRECTION_ERROR" if code == "UNEXPECTED_ERROR" else code,
+            extra_attributes={
+                "graph.correction.success": False,
+                "graph.correction.duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
         logger.error(
             f"Error correcting memory for group {request.group_id}: {e}",
             exc_info=True,

@@ -42,13 +42,19 @@ def setup_telemetry(app: FastAPI) -> None:
         )
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-        from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+        from opentelemetry.sdk.resources import DEPLOYMENT_ENVIRONMENT, SERVICE_NAME, SERVICE_VERSION, Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         global _tracer_provider
 
-        resource = Resource(attributes={SERVICE_NAME: settings.otel_service_name})
+        resource = Resource(
+            attributes={
+                SERVICE_NAME: settings.otel_service_name,
+                SERVICE_VERSION: os.getenv("APP_VERSION", "1.0.0"),
+                DEPLOYMENT_ENVIRONMENT: os.getenv("ENVIRONMENT", "development"),
+            }
+        )
         provider = TracerProvider(resource=resource)
 
         endpoint = f"https://{settings.axiom_domain.rstrip('/')}/v1/traces"

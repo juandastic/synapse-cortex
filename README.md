@@ -13,6 +13,7 @@
 - [API Endpoints](#api-endpoints)
 - [Data Flow](#data-flow)
 - [Technology Stack](#technology-stack)
+- [Observability in Axiom](#observability-in-axiom)
 - [Setup & Deployment](#setup--deployment)
 
 ---
@@ -593,6 +594,80 @@ google-genai>=1.0.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 sse-starlette>=1.8.0
+```
+
+---
+
+## Observability in Axiom
+
+The API now emits structured OpenTelemetry attributes for request-level and service-level debugging in Axiom.
+
+### Attribute namespaces
+
+- `chat.*`: completions, token usage, stream metrics, upstream Gemini details
+- `ingest.*`: job lifecycle, counts, processing metadata
+- `hydrate.*`: hydration request context and output size
+- `graph.*`: graph retrieval/correction context and result counts
+- `db.*`: Neo4j query type, records returned, query latency
+- `upstream.*`: upstream status/error hints for Gemini and HTTP calls
+- `error.*`: normalized category/code/type/message for failures
+
+### Query ideas (Axiom)
+
+Error rate by endpoint:
+
+```apl
+['synapse-cortex-traces']
+| where ['attributes.http.route'] != ''
+| summarize
+    total = count(),
+    failed = countif(['attributes.operation.status'] == 'failed'),
+    error_rate = (countif(['attributes.operation.status'] == 'failed') * 100.0 / count())
+  by route = ['attributes.http.route']
+| order by error_rate desc
+```
+
+Chat completion performance + token usage:
+
+```apl
+['synapse-cortex-traces']
+| where name == 'chat.completion.stream'
+| summarize
+    requests = count(),
+    p95_ms = percentile(['attributes.chat.total_duration_ms'], 95),
+    avg_total_tokens = avg(['attributes.chat.tokens.total']),
+    avg_prompt_tokens = avg(['attributes.chat.tokens.prompt']),
+    avg_completion_tokens = avg(['attributes.chat.tokens.completion'])
+  by model = ['attributes.chat.model']
+| order by requests desc
+```
+
+Gemini/upstream failures by category/status:
+
+```apl
+['synapse-cortex-traces']
+| where ['attributes.upstream.error_type'] != ''
+| summarize
+    failures = count()
+  by category = ['attributes.error.category'],
+     code = ['attributes.error.code'],
+     status = ['attributes.upstream.status_code']
+| order by failures desc
+```
+
+Slow Neo4j queries:
+
+```apl
+['synapse-cortex-traces']
+| where startswith(name, 'db.cypher.')
+| where ['attributes.db.query_duration_ms'] > 500
+| project
+    timestamp,
+    name,
+    query_type = ['attributes.db.query_type'],
+    duration_ms = ['attributes.db.query_duration_ms'],
+    records = ['attributes.db.records_returned']
+| order by duration_ms desc
 ```
 
 ---

@@ -17,6 +17,7 @@ from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
 from opentelemetry import trace
 
+from app.core.observability import classify_error, mark_span_error, mark_span_success, set_span_attributes
 from app.schemas.models import (
     IngestAcceptedResponse,
     IngestMessage,
@@ -93,7 +94,8 @@ class IngestionService:
                 "ingest.user_id": request.userId,
                 "ingest.session_id": request.sessionId,
             },
-        ):
+        ) as span:
+            start = time.monotonic()
             try:
                 episode_content = self._format_messages_for_graphiti(request.messages)
                 episode_name = f"session_{request.sessionId}"
@@ -129,8 +131,31 @@ class IngestionService:
                     f"({len(result.nodes)} nodes, {len(result.edges)} edges, "
                     f"{elapsed_ms:.0f}ms)"
                 )
+                set_span_attributes(
+                    span,
+                    {
+                        "ingest.status": "completed",
+                        "ingest.processing_time_ms": round(elapsed_ms, 1),
+                        "ingest.nodes_extracted": len(result.nodes),
+                        "ingest.edges_extracted": len(result.edges),
+                        "ingest.episode_id": result.episode.uuid,
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
+                mark_span_success(span)
 
             except Exception as e:
+                category, code = classify_error(e)
+                mark_span_error(
+                    span,
+                    e,
+                    category=category,
+                    code="GRAPH_PROCESSING_ERROR" if code == "UNEXPECTED_ERROR" else code,
+                    extra_attributes={
+                        "ingest.status": "failed",
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
                 logger.error(
                     f"Error processing session {request.sessionId}: {e}",
                     exc_info=True,
