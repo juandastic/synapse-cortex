@@ -54,13 +54,22 @@ class IngestResponse(BaseModel):
     code: str | None = None
 
 
+class CompilationMetadataResponse(BaseModel):
+    """V2 hydration metadata for GraphRAG deduplication."""
+
+    is_partial: bool
+    total_estimated_tokens: int
+    included_node_ids: list[str]
+    included_edge_ids: list[str]
+
+
 class IngestAcceptedResponse(BaseModel):
     """202 response for POST /ingest (async fire-and-forget)."""
 
     jobId: str
     status: Literal["processing", "skipped"]
-    # If skipped (insufficient messages), include compilation immediately
     userKnowledgeCompilation: str | None = None
+    compilationMetadata: CompilationMetadataResponse | None = None
 
 
 class IngestStatusResponse(BaseModel):
@@ -69,6 +78,7 @@ class IngestStatusResponse(BaseModel):
     jobId: str
     status: Literal["processing", "completed", "failed"]
     userKnowledgeCompilation: str | None = None
+    compilationMetadata: CompilationMetadataResponse | None = None
     metadata: IngestResponseMetadata | None = None
     error: str | None = None
     code: str | None = None
@@ -166,6 +176,7 @@ class HydrateRequest(BaseModel):
     """Request body for the /hydrate endpoint."""
 
     userId: str
+    version: Literal["v1", "v2"] = "v1"
 
 
 class HydrateResponse(BaseModel):
@@ -173,6 +184,7 @@ class HydrateResponse(BaseModel):
 
     success: bool
     userKnowledgeCompilation: str | None = None
+    compilationMetadata: CompilationMetadataResponse | None = None
     error: str | None = None
     code: str | None = None
 

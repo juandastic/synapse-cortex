@@ -54,14 +54,13 @@ class IngestionService:
                 f"Skipping ingestion for session {request.sessionId}: "
                 f"insufficient messages ({len(request.messages)} messages)"
             )
-            # Still hydrate to return existing knowledge (fast path)
-            compilation = await self.hydration_service.build_user_knowledge(
+            result = await self.hydration_service.build_user_knowledge(
                 request.userId
             )
             return IngestAcceptedResponse(
                 jobId=request.jobId,
                 status="skipped",
-                userKnowledgeCompilation=compilation,
+                userKnowledgeCompilation=result.compilation_text,
             )
 
         # Idempotency: if job already exists (duplicate submit), return current status

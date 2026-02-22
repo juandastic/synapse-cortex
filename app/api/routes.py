@@ -25,6 +25,7 @@ from app.core.observability import (
 )
 from app.schemas.models import (
     ChatCompletionRequest,
+    CompilationMetadataResponse,
     GraphCorrectionRequest,
     GraphCorrectionResponse,
     GraphResponse,
@@ -35,11 +36,25 @@ from app.schemas.models import (
     IngestRequest,
     IngestStatusResponse,
 )
+from app.services.hydration_result import CompilationMetadata
 from app.services.job_store import get_job, remove_job
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _to_metadata_response(
+    meta: CompilationMetadata | None,
+) -> CompilationMetadataResponse | None:
+    if meta is None:
+        return None
+    return CompilationMetadataResponse(
+        is_partial=meta.is_partial,
+        total_estimated_tokens=meta.total_estimated_tokens,
+        included_node_ids=meta.included_node_ids,
+        included_edge_ids=meta.included_edge_ids,
+    )
 
 
 @router.get("/health", response_model=HealthResponse, tags=["Health"])
@@ -149,13 +164,12 @@ async def ingest_status(
 
     if job.status == "completed":
         try:
-            # Hydrate on-demand from Neo4j
-            compilation = await hydration_service.build_user_knowledge(job.user_id)
+            result = await hydration_service.build_user_knowledge(job.user_id)
         except Exception as e:
             category, code = classify_error(e)
             mark_span_error(span, e, category=category, code=code)
             raise
-        metadata = None
+        ingest_metadata = None
         if (
             job.model is not None
             or job.processing_time_ms is not None
@@ -165,7 +179,7 @@ async def ingest_status(
         ):
             from app.schemas.models import IngestResponseMetadata
 
-            metadata = IngestResponseMetadata(
+            ingest_metadata = IngestResponseMetadata(
                 model=job.model or "unknown",
                 processing_time_ms=job.processing_time_ms,
                 nodes_extracted=job.nodes_extracted,
@@ -175,11 +189,11 @@ async def ingest_status(
             set_span_attributes(
                 span,
                 {
-                    "ingest.metadata.model": metadata.model,
-                    "ingest.metadata.processing_time_ms": metadata.processing_time_ms,
-                    "ingest.metadata.nodes_extracted": metadata.nodes_extracted,
-                    "ingest.metadata.edges_extracted": metadata.edges_extracted,
-                    "ingest.metadata.episode_id": metadata.episode_id,
+                    "ingest.metadata.model": ingest_metadata.model,
+                    "ingest.metadata.processing_time_ms": ingest_metadata.processing_time_ms,
+                    "ingest.metadata.nodes_extracted": ingest_metadata.nodes_extracted,
+                    "ingest.metadata.edges_extracted": ingest_metadata.edges_extracted,
+                    "ingest.metadata.episode_id": ingest_metadata.episode_id,
                 },
             )
         remove_job(job_id)
@@ -187,15 +201,16 @@ async def ingest_status(
             span,
             {
                 "duration_ms": round((time.monotonic() - start) * 1000, 2),
-                "ingest.compilation_size_chars": len(compilation),
+                "ingest.compilation_size_chars": len(result.compilation_text),
             },
         )
         mark_span_success(span)
         return IngestStatusResponse(
             jobId=job_id,
             status="completed",
-            userKnowledgeCompilation=compilation,
-            metadata=metadata,
+            userKnowledgeCompilation=result.compilation_text,
+            compilationMetadata=_to_metadata_response(result.metadata),
+            metadata=ingest_metadata,
         )
 
     # job.status == "failed"
@@ -234,21 +249,27 @@ async def hydrate_user(
     """
     span = trace.get_current_span()
     start = time.monotonic()
-    set_span_attributes(span, {"hydrate.user_id": anonymize_id(request.userId)})
+    set_span_attributes(span, {
+        "hydrate.user_id": anonymize_id(request.userId),
+        "hydrate.version": request.version,
+    })
     try:
-        compilation = await hydration_service.build_user_knowledge(request.userId)
+        result = await hydration_service.build_user_knowledge(
+            request.userId, version=request.version,
+        )
         set_span_attributes(
             span,
             {
                 "hydrate.success": True,
-                "hydrate.compilation_size_chars": len(compilation),
+                "hydrate.compilation_size_chars": len(result.compilation_text),
                 "hydrate.duration_ms": round((time.monotonic() - start) * 1000, 2),
             },
         )
         mark_span_success(span)
         return HydrateResponse(
             success=True,
-            userKnowledgeCompilation=compilation,
+            userKnowledgeCompilation=result.compilation_text,
+            compilationMetadata=_to_metadata_response(result.metadata),
         )
     except Exception as e:
         category, code = classify_error(e)

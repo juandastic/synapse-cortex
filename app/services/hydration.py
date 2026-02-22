@@ -3,9 +3,14 @@ Hydration Service - Builds user knowledge compilation from Neo4j.
 
 Uses direct Cypher queries (bypassing Graphiti) for performance.
 Implements degree-based filtering to prioritize well-connected entities.
+
+Supports two compilation strategies:
+  v1 (default) - Full dump, no budget constraints
+  v2 - Cascading waterfill allocation with token budget
 """
 
 import time
+from typing import Literal
 
 from neo4j import AsyncDriver
 from opentelemetry import trace
@@ -17,6 +22,8 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
+from app.services.hydration_result import HydrationResult
+from app.services.hydration_v2 import HydrationV2Engine
 
 # Default minimum connections for entity inclusion (filters long-tail noise)
 DEFAULT_MIN_DEGREE = 2
@@ -53,6 +60,11 @@ ORDER BY r.valid_at DESC
 """
 
 
+def _compact_date(value: object) -> str:
+    """Extract YYYY-MM-DD from Neo4j DateTime or ISO string."""
+    return str(value)[:10]
+
+
 class HydrationService:
     """Service for building user knowledge compilation from the knowledge graph."""
 
@@ -60,21 +72,24 @@ class HydrationService:
         self.driver = driver
         self.min_degree = min_degree
 
-    async def build_user_knowledge(self, user_id: str) -> str:
-        """
-        Build a user knowledge compilation from the knowledge graph.
+    async def build_user_knowledge(
+        self,
+        user_id: str,
+        version: Literal["v1", "v2"] = "v1",
+    ) -> HydrationResult:
+        if version == "v2":
+            engine = HydrationV2Engine(self.driver, self.min_degree)
+            return await engine.build(user_id)
 
-        Args:
-            user_id: The user's ID (used as group_id in the graph).
+        return await self._build_v1(user_id)
 
-        Returns:
-            A structured text compilation of the user's knowledge profile.
-        """
+    async def _build_v1(self, user_id: str) -> HydrationResult:
         tracer = trace.get_tracer(__name__)
         with tracer.start_as_current_span(
             "hydration.build_user_knowledge",
             attributes={
                 "hydrate.user_id": anonymize_id(user_id),
+                "hydrate.version": "v1",
                 "hydrate.min_degree": self.min_degree,
             },
         ) as span:
@@ -94,7 +109,7 @@ class HydrationService:
                         },
                     )
                     mark_span_success(span)
-                    return ""
+                    return HydrationResult(compilation_text="")
 
                 compilation = self._format_compilation(definitions, relationships)
                 set_span_attributes(
@@ -107,7 +122,7 @@ class HydrationService:
                     },
                 )
                 mark_span_success(span)
-                return compilation
+                return HydrationResult(compilation_text=compilation)
             except Exception as e:
                 category, code = classify_error(e)
                 mark_span_error(span, e, category=category, code=code)
@@ -206,12 +221,11 @@ class HydrationService:
                 if fact:
                     line += f': "{fact}"'
 
-                # Add temporal context if available
                 temporal_parts = []
                 if valid_at:
-                    temporal_parts.append(f"valid_at: {valid_at}")
+                    temporal_parts.append(f"since: {_compact_date(valid_at)}")
                 if invalid_at:
-                    temporal_parts.append(f"invalid_at: {invalid_at}")
+                    temporal_parts.append(f"until: {_compact_date(invalid_at)}")
                 if temporal_parts:
                     line += f" [{', '.join(temporal_parts)}]"
 
