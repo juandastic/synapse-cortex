@@ -8,6 +8,9 @@ pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 sse-starlette>=1.8.0
 
+# Console (Rails-style REPL with top-level await)
+ipython
+
 # OpenTelemetry + Axiom
 opentelemetry-api
 opentelemetry-sdk

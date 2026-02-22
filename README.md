@@ -739,7 +739,25 @@ curl -X POST http://localhost:8000/hydrate \
   -d '{"userId": "test-user"}'
 ```
 
-#### 6. Stop Services
+#### 6. Rails-style console (optional)
+Interactive Python shell with Graphiti and all project services pre-loaded (like `rails c`):
+
+```bash
+# From project root, with venv active
+python scripts/console.py
+```
+
+You get a REPL with `graphiti`, `neo4j_driver`, `graph_service`, `hydration_service`, `ingestion_service`, `generation_service`, and `settings` in scope. Try searches, call services, or run any Python. Install IPython for top-level `await` and a nicer prompt: `pip install ipython`.
+
+**Examples in the console:**
+```python
+edges = await graphiti.search("what are my preferences?", group_id="user-123")
+g = await graph_service.get_graph("user-123")
+```
+
+For a minimal search-only loop (no free-form code), use `python scripts/graphiti_repl.py` instead.
+
+#### 7. Stop Services
 ```bash
 # Stop Neo4j
 docker-compose -f docker-compose.local.yml down
@@ -851,6 +869,13 @@ docker-compose down
 
 # Restore from backup
 docker run --rm -v synapse-cortex_neo4j_data:/data -v $(pwd):/backup ubuntu tar xzf /backup/neo4j-backup-YYYYMMDD.tar.gz -C /
+
+docker run --rm \
+  -v $(pwd):/backups \
+  -v synapse-cortex_neo4j_data:/data \
+  neo4j:5-community \
+  neo4j-admin database load neo4j --from-path=/backups --overwrite-destination=true
+
 
 # Restart services
 docker-compose up -d
