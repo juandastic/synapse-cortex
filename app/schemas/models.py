@@ -129,6 +129,7 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage]
     model: str = Field(default="gemini-3-flash-preview", description="Model to use for completion")
     stream: bool = Field(default=True, description="Whether to stream the response")
+    compilationMetadata: CompilationMetadataResponse | None = None
 
 
 class ChatCompletionDelta(BaseModel):

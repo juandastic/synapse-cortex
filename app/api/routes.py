@@ -317,6 +317,16 @@ async def chat_completions(
         if isinstance(msg.content, list):
             has_images = has_images or any(part.type == "image_url" for part in msg.content)
 
+    compilation_attrs: dict[str, object] = {}
+    if request.compilationMetadata:
+        cm = request.compilationMetadata
+        compilation_attrs = {
+            "chat.compilation.is_partial": cm.is_partial,
+            "chat.compilation.estimated_tokens": cm.total_estimated_tokens,
+            "chat.compilation.nodes_count": len(cm.included_node_ids),
+            "chat.compilation.edges_count": len(cm.included_edge_ids),
+        }
+
     set_span_attributes(
         span,
         {
@@ -325,6 +335,7 @@ async def chat_completions(
             "chat.messages_count": len(request.messages),
             "chat.system_prompt_chars": system_prompt_chars,
             "chat.has_images": has_images,
+            **compilation_attrs,
         },
     )
     mark_span_success(span)
