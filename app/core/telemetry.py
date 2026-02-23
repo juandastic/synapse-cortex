@@ -2,7 +2,8 @@
 OpenTelemetry telemetry setup for Synapse Cortex.
 
 Exports traces to Axiom via OTLP. Auto-instruments FastAPI (inbound requests)
-and httpx (outbound HTTP calls, including Graphiti's internal Gemini calls).
+and common async HTTP clients (httpx/aiohttp for outbound calls, including
+Graphiti's internal Gemini calls).
 
 If AXIOM_API_TOKEN is not set, telemetry is disabled (no-op).
 """
@@ -24,7 +25,7 @@ def setup_telemetry(app: FastAPI) -> None:
     """
     Configure OpenTelemetry and instrument the FastAPI app.
 
-    Instruments FastAPI (inbound requests) and httpx (outbound HTTP).
+    Instruments FastAPI (inbound requests) and outbound HTTP clients.
     No-ops if AXIOM_API_TOKEN is not set.
     """
     settings = get_settings()
@@ -40,6 +41,7 @@ def setup_telemetry(app: FastAPI) -> None:
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter,
         )
+        from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         from opentelemetry.sdk.resources import DEPLOYMENT_ENVIRONMENT, SERVICE_NAME, SERVICE_VERSION, Resource
@@ -69,8 +71,9 @@ def setup_telemetry(app: FastAPI) -> None:
         trace.set_tracer_provider(provider)
         _tracer_provider = provider
 
-        # Auto-instrument httpx first (outbound calls)
+        # Auto-instrument common outbound HTTP clients used by SDKs.
         HTTPXClientInstrumentor().instrument()
+        AioHttpClientInstrumentor().instrument()
 
         # Auto-instrument FastAPI (inbound requests)
         FastAPIInstrumentor.instrument_app(app)
