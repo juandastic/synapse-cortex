@@ -5,7 +5,9 @@ API Routes - Endpoint definitions for Synapse Cortex.
 import logging
 import time
 
-from fastapi import APIRouter, HTTPException
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from opentelemetry import trace
 
@@ -125,6 +127,7 @@ async def ingest_status(
     job_id: str,
     _api_key: ApiKeyDep,
     hydration_service: HydrationServiceDep,
+    version: Literal["v1", "v2"] = Query("v1"),
 ) -> IngestStatusResponse:
     """
     Poll for ingest job status. Returns full result when completed.
@@ -164,7 +167,7 @@ async def ingest_status(
 
     if job.status == "completed":
         try:
-            result = await hydration_service.build_user_knowledge(job.user_id)
+            result = await hydration_service.build_user_knowledge(job.user_id, version=version)
         except Exception as e:
             category, code = classify_error(e)
             mark_span_error(span, e, category=category, code=code)

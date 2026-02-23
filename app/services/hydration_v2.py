@@ -21,11 +21,11 @@ from app.core.observability import (
 from app.services.hydration_result import CompilationMetadata, HydrationResult
 
 DEFAULT_CHAR_LIMIT = 120_000
-NODE_BUDGET_RATIO = 0.35
-# Nodes rarely consume their full 35%; leftover rolls into the edge budget
-EDGE_BUDGET_RATIO = 0.65
-# Entities in the top 20% by degree are considered structural hubs
-HUB_PERCENTILE = 0.80
+NODE_BUDGET_RATIO = 0.40
+# Nodes rarely consume their full 40%; leftover rolls into the edge budget
+EDGE_BUDGET_RATIO = 0.60
+# Entities in the top 30% by degree are considered structural hubs
+HUB_PERCENTILE = 0.70
 
 FETCH_NODES_QUERY = """
 MATCH (n:Entity)-[r:RELATES_TO]-(other:Entity)

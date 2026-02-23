@@ -89,7 +89,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
-    ingestion_service = IngestionService(graphiti, hydration_service, settings.graphiti_model)
+    ingestion_service = IngestionService(graphiti, settings.graphiti_model)
     generation_service = GenerationService(settings.google_api_key)
     graph_service = GraphService(neo4j_driver, graphiti)
 

@@ -1,9 +1,8 @@
 """
-Ingestion Service - Processes chat sessions via Graphiti and returns user knowledge compilation.
+Ingestion Service - Processes chat sessions via Graphiti.
 
-Combines:
-1. Graphiti add_episode for knowledge extraction
-2. Hydration service for building the updated compilation (on-demand via GET /ingest/status)
+Graphiti add_episode extracts entities and relationships into Neo4j.
+Hydration (compilation) happens on-demand via GET /ingest/status when the job completes.
 
 Async flow: accept_session returns 202 immediately, _process_background runs in background.
 """
@@ -25,7 +24,6 @@ from app.schemas.models import (
     IngestResponse,
     IngestResponseMetadata,
 )
-from app.services.hydration import HydrationService
 from app.services.job_store import complete_job, create_job, fail_job, get_job
 
 logger = logging.getLogger(__name__)
@@ -38,29 +36,24 @@ MIN_TOTAL_CHARS = 5
 class IngestionService:
     """Service for processing chat sessions into the knowledge graph."""
 
-    def __init__(self, graphiti: Graphiti, hydration_service: HydrationService, model: str):
+    def __init__(self, graphiti: Graphiti, model: str):
         self.graphiti = graphiti
-        self.hydration_service = hydration_service
         self.model = model
 
     async def accept_session(self, request: IngestRequest) -> IngestAcceptedResponse:
         """
         Accept an ingest request: validate, create job entry, launch background processing.
-        Returns immediately with 202. If messages are insufficient, returns "skipped" with compilation.
+        Returns immediately with 202. If messages are insufficient, returns "skipped" —
+        the frontend uses its cached knowledge as fallback.
         """
-        # Validation: skip if messages too short
         if not self._should_ingest(request.messages):
             logger.info(
                 f"Skipping ingestion for session {request.sessionId}: "
                 f"insufficient messages ({len(request.messages)} messages)"
             )
-            result = await self.hydration_service.build_user_knowledge(
-                request.userId
-            )
             return IngestAcceptedResponse(
                 jobId=request.jobId,
                 status="skipped",
-                userKnowledgeCompilation=result.compilation_text,
             )
 
         # Idempotency: if job already exists (duplicate submit), return current status

@@ -191,9 +191,11 @@ GET /ingest/status/{jobId} → Poll until completed → Hydrate on-demand from N
 ### 2. **Hydration Service** (`app/services/hydration.py`)
 **Purpose**: Build user knowledge compilations from the graph
 
-**Architecture**:
+Supports two strategies selected via `version` parameter: **V1** (full dump) and **V2** (budget-aware).
+
+**Architecture (shared)**:
 - **Direct Cypher Queries**: Bypasses Graphiti for read performance
-- **Degree-Based Filtering**: Only includes entities with ≥2 connections (default)
+- **Degree-Based Filtering**: Only includes entities with >= 2 connections (default)
 - **Two-Phase Output**:
   1. **Conceptual Definitions**: Entity summaries ordered by connectivity
   2. **Relational Dynamics**: Relationships with facts, timestamps, and temporal context
@@ -205,11 +207,56 @@ GET /ingest/status/{jobId} → Poll until completed → Hydrate on-demand from N
 ...
 
 #### 2. RELATIONAL DYNAMICS & CAUSALITY ####
-- Entity1 relates to Entity2: "fact describing relationship" [valid_at: timestamp]
+- Entity1 relates to Entity2: "fact describing relationship" [since: 2026-02-17]
 ...
 
 ### STATS ###
 Definitions: X | Relations: Y | Est. Tokens: ~Z
+```
+
+#### V2: Budget-Aware Compilation (`app/services/hydration_v2.py`)
+
+V1 dumps everything into the system prompt with no size control. V2 introduces a **cascading waterfill allocation** that maximizes context within a character budget (~120k chars / ~30k tokens), ensuring the compilation never blows up the context window.
+
+**How it works:**
+
+1. **Quality Gates** -- Only entities with degree >= 2 and temporally valid edges are fetched (same as V1).
+
+2. **Fast Path** -- If the total formatted text fits within the budget, return everything with `is_partial: false`.
+
+3. **Waterfill Allocation** -- When the budget is exceeded:
+
+```
+Budget: 120,000 chars
+├── Block A: Nodes (40% = 48,000 chars)
+│   Iterate by degree DESC, include atomically until budget exceeded.
+│   Unused chars roll over to Block B.
+│
+└── Block B: Edges (60% + rollover)
+    ├── P1: Hub-to-Hub (both nodes in top 20% by degree) — almost always included
+    ├── P2: Hub + Recency (one hub node, sorted by date DESC)
+    └── P3: Long Tail (low-degree nodes, sorted by date DESC, fills remaining budget)
+```
+
+**Hub classification** is done entirely in Python using a dictionary built from the node query results -- no extra DB calls. Edges are classified with O(1) lookups against `node_degree_map`.
+
+**Feature flagging**: Pass `"version": "v2"` in the `/hydrate` request body. Defaults to `"v1"`.
+
+**V2 returns metadata** for future GraphRAG deduplication:
+```json
+{
+  "compilationMetadata": {
+    "is_partial": true,
+    "total_estimated_tokens": 29500,
+    "included_node_ids": ["uuid-1", "uuid-2"],
+    "included_edge_ids": ["uuid-x", "uuid-y"]
+  }
+}
+```
+
+This lets the frontend persist which nodes/edges are already in the system prompt, so dynamic retrieval only injects what the LLM doesn't already know:
+```python
+new_edges = [e for e in retrieved_edges if e.id not in metadata.included_edge_ids]
 ```
 
 ### 3. **Generation Service** (`app/services/generation.py`)
@@ -365,11 +412,17 @@ All endpoints (except `/health`) require an `X-API-SECRET` header matching `SYNA
 **Request Body**:
 ```json
 {
-  "userId": "user-123"
+  "userId": "user-123",
+  "version": "v2"
 }
 ```
 
-**Response**:
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `userId` | string | - | Required. User/group ID in the graph |
+| `version` | `"v1"` \| `"v2"` | `"v1"` | Hydration strategy. V2 uses budget-aware waterfill allocation |
+
+**Response (V1)**:
 ```json
 {
   "success": true,
@@ -377,10 +430,24 @@ All endpoints (except `/health`) require an `X-API-SECRET` header matching `SYNA
 }
 ```
 
+**Response (V2)** -- includes `compilationMetadata` for GraphRAG deduplication:
+```json
+{
+  "success": true,
+  "userKnowledgeCompilation": "#### 1. CONCEPTUAL DEFINITIONS & IDENTITY ####\n...",
+  "compilationMetadata": {
+    "is_partial": true,
+    "total_estimated_tokens": 29500,
+    "included_node_ids": ["uuid-1", "uuid-2"],
+    "included_edge_ids": ["uuid-x", "uuid-y"]
+  }
+}
+```
+
 **Use Cases**:
 - Debugging current graph state
 - Fetching context without re-indexing
-- Testing hydration logic
+- Feature-flagging V1 vs V2 compilation from the frontend
 
 ---
 
