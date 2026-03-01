@@ -151,6 +151,7 @@ class GenerationService:
                         total_tokens=usage_metadata.total_token_count or 0,
                         thoughts_tokens=getattr(usage_metadata, "thoughts_token_count", None),
                         cached_tokens=getattr(usage_metadata, "cached_content_token_count", None),
+                        **request.rag_usage_fields,
                     )
                     set_span_attributes(
                         span,

@@ -6,6 +6,8 @@ from typing import Annotated
 
 from fastapi import Depends, Request
 
+from graphiti_core import Graphiti
+
 from app.core.security import verify_api_key
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
@@ -37,8 +39,14 @@ def get_graph_service(request: Request) -> GraphService:
     return request.app.state.graph_service
 
 
+def get_graphiti(request: Request) -> Graphiti:
+    """Get the Graphiti client from app state."""
+    return request.app.state.graphiti
+
+
 # Type aliases for service dependencies
 HydrationServiceDep = Annotated[HydrationService, Depends(get_hydration_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
 GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
+GraphitiDep = Annotated[Graphiti, Depends(get_graphiti)]

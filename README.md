@@ -53,12 +53,18 @@ The system is built on [Graphiti](https://github.com/getzep/graphiti), a tempora
 - **Cypher-Optimized**: Direct Neo4j queries bypass Graphiti's abstraction for read performance
 - **Connectivity-Based Ranking**: Prioritizes well-connected entities over noise
 
-### 4. 🗺️ Knowledge Graph Visualization
+### 4. 🧩 GraphRAG - Per-Turn Retrieval-Augmented Generation
+- **Hybrid Search**: Combines semantic embeddings + BM25 full-text search (RRF fusion) via Graphiti
+- **Deduplication**: Only injects edges/nodes not already present in the hydrated base prompt
+- **Automatic Gating**: Skips retrieval when the graph fits entirely in the prompt (`is_partial: false`)
+- **Zero-LLM Overhead**: No agent or tool-calling loop — deterministic pipeline with ~1s latency
+
+### 5. 🗺️ Knowledge Graph Visualization
 - **React-Force-Graph Format**: Nodes and links ready for frontend rendering
 - **Real-Time Corrections**: Natural language memory edits via Graphiti's episode pipeline
 - **Temporal Filtering**: Only shows valid (non-expired) relationships
 
-### 5. 🔐 Security & Rate Limiting
+### 6. 🔐 Security & Rate Limiting
 - **API Key Authentication**: All endpoints (except `/health`) require `X-API-SECRET` header
 - **Concurrency Control**: Configurable semaphore limits to avoid LLM rate limits (429 errors)
 - **CORS Middleware**: Supports cross-origin requests for web frontends
@@ -259,7 +265,40 @@ This lets the frontend persist which nodes/edges are already in the system promp
 new_edges = [e for e in retrieved_edges if e.id not in metadata.included_edge_ids]
 ```
 
-### 3. **Generation Service** (`app/services/generation.py`)
+### 3. **GraphRAG Service** (`app/services/graph_rag.py`)
+**Purpose**: Per-turn retrieval-augmented generation from the knowledge graph
+
+When the hydrated compilation is partial (budget-constrained by V2), GraphRAG runs a hybrid search on every chat turn to retrieve long-tail edges and nodes that didn't make the cut, deduplicates them against what's already in the prompt, and injects the new context before generation.
+
+**Pipeline**:
+```
+User message → Build query (last 3 messages) → Graphiti hybrid search (semantic + BM25)
+  → Deduplicate against compilationMetadata.included_*_ids
+  → Format context block → Append to system message → Stream Gemini
+```
+
+**Gating logic** (`get_rag_skip_reason`):
+| Condition | Action |
+|-----------|--------|
+| No `user_id` | Skip — no graph to search |
+| No `compilationMetadata` | Skip — no dedup info available |
+| `is_partial == false` | Skip — full graph already in prompt |
+| Otherwise | Run GraphRAG search |
+
+**Key design decisions**:
+- **No agent/tool-calling**: Direct deterministic pipeline — avoids the extra LLM round-trip latency that agent frameworks add (~2-5s vs ~1s)
+- **Deduplication by UUID**: Uses `included_edge_ids` / `included_node_ids` from V2 metadata to ensure zero redundancy with the base prompt
+- **Text sanitization**: Decodes HTML entities and collapses stray newlines in facts/summaries before injection
+- **Graceful degradation**: On search failure, proceeds without RAG context (never blocks generation)
+
+**Telemetry** (OTel `rag.*` namespace):
+- `rag.enabled`, `rag.skipped_reason`
+- `rag.search_duration_ms`, `rag.total_duration_ms`
+- `rag.raw_edges_count`, `rag.deduped_edges_count`, `rag.injected_edges_count`
+- `rag.raw_nodes_count`, `rag.deduped_nodes_count`, `rag.injected_nodes_count`
+- `rag.query_chars`, `rag.context_block_chars`
+
+### 4. **Generation Service** (`app/services/generation.py`)
 **Purpose**: OpenAI-compatible streaming chat completions
 
 **Features**:
@@ -279,7 +318,7 @@ data: {"id": "chatcmpl-...", "choices": [{"delta": {}, "finish_reason": "stop"}]
 data: [DONE]
 ```
 
-### 4. **Graph Service** (`app/services/graph.py`)
+### 5. **Graph Service** (`app/services/graph.py`)
 **Purpose**: Knowledge graph visualization and memory correction
 
 **Key Functions**:
@@ -584,24 +623,32 @@ data: [DONE]
 ```
 1. CLIENT
    └─▶ POST /v1/chat/completions
-       {messages, model, stream: true}
+       {messages, model, stream: true, user_id, compilationMetadata}
 
-2. GENERATION SERVICE
+2. GRAPH RAG (conditional)
+   ├─▶ Gate check: user_id present? compilationMetadata.is_partial == true?
+   ├─▶ Build search query from last 3 messages
+   ├─▶ Graphiti hybrid search (semantic + BM25, limit=10)
+   ├─▶ Deduplicate against included_edge_ids / included_node_ids
+   └─▶ Append context block to system message
+
+3. GENERATION SERVICE
    ├─▶ Convert messages to Gemini format
-   │   - Extract system prompt
+   │   - Extract system prompt (now includes RAG context)
    │   - Prepend to first user message
    │   - Map roles: user/assistant → user/model
    └─▶ Call gemini.generate_content_stream()
 
-3. GEMINI API
+4. GEMINI API
    └─▶ Stream token chunks
 
-4. GENERATION SERVICE
+5. GENERATION SERVICE
    ├─▶ Wrap chunks in OpenAI SSE format
    │   data: {"choices": [{"delta": {"content": "..."}}]}
+   ├─▶ Include RAG stats in final usage chunk (rag_enabled, rag_edges, etc.)
    └─▶ Send [DONE] marker
 
-5. CLIENT
+6. CLIENT
    └─▶ Receives streamed response
 ```
 
@@ -672,6 +719,7 @@ The API now emits structured OpenTelemetry attributes for request-level and serv
 ### Attribute namespaces
 
 - `chat.*`: completions, token usage, stream metrics, upstream Gemini details
+- `rag.*`: GraphRAG gating, search latency, edge/node counts, dedup stats
 - `ingest.*`: job lifecycle, counts, processing metadata
 - `hydrate.*`: hydration request context and output size
 - `graph.*`: graph retrieval/correction context and result counts
@@ -720,6 +768,21 @@ Gemini/upstream failures by category/status:
      code = ['attributes.error.code'],
      status = ['attributes.upstream.status_code']
 | order by failures desc
+```
+
+GraphRAG retrieval performance:
+
+```apl
+['synapse-cortex-traces']
+| where ['attributes.rag.enabled'] == true
+| summarize
+    requests = count(),
+    p95_search_ms = percentile(['attributes.rag.search_duration_ms'], 95),
+    avg_injected_edges = avg(['attributes.rag.injected_edges_count']),
+    avg_injected_nodes = avg(['attributes.rag.injected_nodes_count']),
+    avg_deduped = avg(['attributes.rag.deduped_edges_count'] + ['attributes.rag.deduped_nodes_count']),
+    zero_injection_rate = (countif(['attributes.rag.injected_edges_count'] + ['attributes.rag.injected_nodes_count'] == 0) * 100.0 / count())
+| order by requests desc
 ```
 
 Slow Neo4j queries:

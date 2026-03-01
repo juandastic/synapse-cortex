@@ -130,6 +130,8 @@ class ChatCompletionRequest(BaseModel):
     model: str = Field(default="gemini-3-flash-preview", description="Model to use for completion")
     stream: bool = Field(default=True, description="Whether to stream the response")
     compilationMetadata: CompilationMetadataResponse | None = None
+    user_id: str | None = Field(default=None, description="User/group ID for GraphRAG context retrieval")
+    rag_usage_fields: dict[str, object] = Field(default_factory=dict, exclude=True)
 
 
 class ChatCompletionDelta(BaseModel):
@@ -155,6 +157,11 @@ class UsageData(BaseModel):
     total_tokens: int = Field(..., description="Total tokens (prompt + completion)")
     thoughts_tokens: int | None = Field(default=None, description="Thinking tokens (Gemini 2.5+ models)")
     cached_tokens: int | None = Field(default=None, description="Tokens served from cache")
+    rag_enabled: bool | None = Field(default=None, description="Whether GraphRAG context retrieval ran")
+    rag_edges: int | None = Field(default=None, description="Episodic edges injected into the prompt")
+    rag_nodes: int | None = Field(default=None, description="Entity nodes injected into the prompt")
+    rag_search_ms: float | None = Field(default=None, description="Graphiti search latency in ms")
+    rag_context_chars: int | None = Field(default=None, description="Characters of RAG context injected")
 
 
 class ChatCompletionChunk(BaseModel):

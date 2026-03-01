@@ -14,6 +14,7 @@ from opentelemetry import trace
 from app.api.dependencies import (
     ApiKeyDep,
     GenerationServiceDep,
+    GraphitiDep,
     GraphServiceDep,
     HydrationServiceDep,
     IngestionServiceDep,
@@ -39,6 +40,11 @@ from app.schemas.models import (
     IngestStatusResponse,
 )
 from app.services.hydration_result import CompilationMetadata
+from app.services.graph_rag import (
+    maybe_run_graph_rag,
+    rag_outcome_to_span_attrs,
+    rag_outcome_to_usage_fields,
+)
 from app.services.job_store import get_job, remove_job
 
 logger = logging.getLogger(__name__)
@@ -299,12 +305,18 @@ async def chat_completions(
     request: ChatCompletionRequest,
     _api_key: ApiKeyDep,
     generation_service: GenerationServiceDep,
+    graphiti: GraphitiDep,
 ):
     """
     OpenAI-compatible chat completions endpoint with streaming.
     
     Streams responses using Server-Sent Events (SSE) in the same format
     as OpenAI's API for easy frontend integration.
+    
+    When ``user_id`` and ``compilationMetadata`` are present and the graph
+    was only partially loaded (``is_partial == True``), a GraphRAG
+    retrieval step runs before generation to inject long-tail episodic
+    memories into the payload.
     
     Requires X-API-SECRET header for authentication.
     """
@@ -327,6 +339,11 @@ async def chat_completions(
             "chat.compilation.edges_count": len(cm.included_edge_ids),
         }
 
+    # --- GraphRAG Context Retrieval ---
+    rag_outcome = await maybe_run_graph_rag(request, graphiti)
+    rag_attrs = rag_outcome_to_span_attrs(rag_outcome)
+    request.rag_usage_fields = rag_outcome_to_usage_fields(rag_outcome)
+
     set_span_attributes(
         span,
         {
@@ -336,6 +353,7 @@ async def chat_completions(
             "chat.system_prompt_chars": system_prompt_chars,
             "chat.has_images": has_images,
             **compilation_attrs,
+            **rag_attrs,
         },
     )
     mark_span_success(span)
@@ -345,7 +363,7 @@ async def chat_completions(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering
+            "X-Accel-Buffering": "no",
         },
     )
 
