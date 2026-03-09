@@ -19,3 +19,9 @@ opentelemetry-instrumentation-fastapi
 opentelemetry-instrumentation-httpx
 opentelemetry-instrumentation-aiohttp-client
 aiohttp
+
+# PoC: Notion MCP agent
+langchain-google-genai
+langchain-mcp-adapters
+langgraph
+notion-client

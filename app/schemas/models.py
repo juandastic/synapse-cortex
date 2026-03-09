@@ -252,3 +252,55 @@ class HealthResponse(BaseModel):
 
     status: str = "ok"
     service: str = "synapse-cortex"
+
+
+# =============================================================================
+# Notion Export Models
+# =============================================================================
+
+
+class NotionExportRequest(BaseModel):
+    """Request body for the POST /v1/notion/export endpoint."""
+
+    userId: str
+    notionToken: str = Field(..., description="Notion internal integration secret")
+    pageName: str = Field(..., description="Name of the parent Notion page to export under")
+    language: str = Field(default="English", description="Output language for all generated Notion content")
+
+
+class NotionExportAcceptedResponse(BaseModel):
+    """202 response for POST /v1/notion/export (async fire-and-forget)."""
+
+    jobId: str
+    status: Literal["processing"] = "processing"
+    pageId: str = Field(..., description="Resolved Notion parent page ID")
+
+
+class NotionExportProgress(BaseModel):
+    """Current pipeline progress included in status polling responses."""
+
+    currentStep: str
+    categoriesDesigned: int | None = None
+    entriesExtracted: int | None = None
+    databasesCreated: int | None = None
+
+
+class NotionExportResult(BaseModel):
+    """Final result payload when the export completes successfully."""
+
+    databaseIds: dict[str, str]
+    summaryPageUrl: str | None = None
+    categoriesCount: int
+    entriesCount: int
+    durationMs: float
+
+
+class NotionExportStatusResponse(BaseModel):
+    """Response for GET /v1/notion/export/status/{job_id}."""
+
+    jobId: str
+    status: Literal["processing", "completed", "failed"]
+    progress: NotionExportProgress | None = None
+    result: NotionExportResult | None = None
+    error: str | None = None
+    code: str | None = None

@@ -13,6 +13,7 @@ from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
+from app.services.notion_export import NotionExportService
 
 
 # Type alias for API key dependency
@@ -44,9 +45,15 @@ def get_graphiti(request: Request) -> Graphiti:
     return request.app.state.graphiti
 
 
+def get_notion_export_service(request: Request) -> NotionExportService:
+    """Get the Notion export service from app state."""
+    return request.app.state.notion_export_service
+
+
 # Type aliases for service dependencies
 HydrationServiceDep = Annotated[HydrationService, Depends(get_hydration_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
 GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 GraphitiDep = Annotated[Graphiti, Depends(get_graphiti)]
+NotionExportServiceDep = Annotated[NotionExportService, Depends(get_notion_export_service)]

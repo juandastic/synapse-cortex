@@ -14,6 +14,7 @@
 - [Data Flow](#data-flow)
 - [Technology Stack](#technology-stack)
 - [Observability in Axiom](#observability-in-axiom)
+- [Notion Export](#notion-export)
 - [Setup & Deployment](#setup--deployment)
 
 ---
@@ -64,7 +65,15 @@ The system is built on [Graphiti](https://github.com/getzep/graphiti), a tempora
 - **Real-Time Corrections**: Natural language memory edits via Graphiti's episode pipeline
 - **Temporal Filtering**: Only shows valid (non-expired) relationships
 
-### 6. 🔐 Security & Rate Limiting
+### 6. 📤 Notion Export
+- **Graph-to-Notion Pipeline**: Exports a user's knowledge graph into structured Notion databases with a summary page
+- **Dynamic Schema Design**: Gemini analyzes the graph and designs 3-10 category databases with optimal column schemas
+- **MCP Agent Integration**: Uses the Notion MCP server via `create_react_agent` for flexible row creation and page building
+- **Async with Polling**: Fire-and-forget pattern (202 + status polling) with step-level progress tracking
+- **Feedback Loop Columns**: Every database includes "Needs Review" (checkbox) and "Correction Notes" (rich_text) for future graph corrections
+- **Per-Request Auth**: Notion token is passed per-request (not server-side) for multi-tenant use
+
+### 7. 🔐 Security & Rate Limiting
 - **API Key Authentication**: All endpoints (except `/health`) require `X-API-SECRET` header
 - **Concurrency Control**: Configurable semaphore limits to avoid LLM rate limits (429 errors)
 - **CORS Middleware**: Supports cross-origin requests for web frontends
@@ -333,6 +342,24 @@ Instead of direct CRUD operations (which break embeddings), corrections are proc
 
 **Example**: "I no longer want to apply for the O-1 visa, I decided to stay in Colombia" → Graphiti invalidates old edges and creates new ones
 
+### 6. **Notion Export Service** (`app/services/notion_export.py`)
+**Purpose**: Export a user's knowledge graph into structured Notion databases
+
+**Pipeline** (5 sequential steps, each with its own OTel span):
+
+| Step | Name | Method | Description |
+|------|------|--------|-------------|
+| 1 | Hydrate | `HydrationService.build_user_knowledge(v1)` | Build the full graph compilation from Neo4j |
+| 2a | Analyze Schemas | Gemini structured output (`SchemaResult`) | Design 3-10 category databases with column schemas |
+| 2b | Extract Entries | Gemini structured output (`ExtractionResult`) | Extract rows for each category (one LLM call per category) |
+| 3 | Create Databases | Notion SDK (`notion.request()`) | Create one Notion database per category under the parent page |
+| 4 | Populate | MCP agent (`create_react_agent`) | Fill databases with extracted rows (batched, 12 rows per agent call) |
+| 5 | Summarize | MCP agent | Create a "Knowledge Graph Overview" page with links to all databases |
+
+**MCP Lifecycle**: Steps 4-5 spawn a Node.js subprocess (`npx @notionhq/notion-mcp-server`) that communicates with Python via stdin/stdout JSON-RPC. The `async with stdio_client(...)` context manager handles startup, communication, and cleanup. A semaphore (`max_concurrent_exports=3`) limits concurrent subprocesses.
+
+**Job Store** (`app/services/notion_export_job_store.py`): Tracks `current_step`, `categories_count`, `entries_count`, `database_ids`, and `summary_page_url`. Same in-memory pattern as the ingest job store.
+
 ---
 
 ## API Endpoints
@@ -580,6 +607,219 @@ data: [DONE]
 
 ---
 
+#### 📤 `POST /v1/notion/export`
+**Purpose**: Export a user's knowledge graph into Notion databases (async)
+**Auth**: ✅ Required (`X-API-SECRET`)
+**Status**: `202 Accepted`
+**Request Body**:
+```json
+{
+  "userId": "user-123",
+  "notionToken": "ntn_your_notion_integration_secret",
+  "pageName": "Synapse",
+  "language": "English"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `userId` | string | - | Required. User/group ID whose graph to export |
+| `notionToken` | string | - | Required. Notion internal integration secret |
+| `pageName` | string | - | Required. Name of the parent Notion page (must be shared with the integration) |
+| `language` | string | `"English"` | Output language for all generated Notion content |
+
+**Response** (202):
+```json
+{
+  "jobId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "status": "processing",
+  "pageId": "12345678-abcd-1234-abcd-123456789abc"
+}
+```
+
+The Notion token and page name are validated synchronously before returning 202. If the token is invalid or the page is not found, you get a 400 error immediately.
+
+**Client Flow**: Poll `GET /v1/notion/export/status/{jobId}` for progress and results.
+
+---
+
+#### 📊 `GET /v1/notion/export/status/{job_id}`
+**Purpose**: Poll for Notion export job status and retrieve result when completed
+**Auth**: ✅ Required (`X-API-SECRET`)
+
+**Response** (processing):
+```json
+{
+  "jobId": "a1b2c3d4-...",
+  "status": "processing",
+  "progress": {
+    "currentStep": "populating",
+    "categoriesDesigned": 6,
+    "entriesExtracted": 42
+  }
+}
+```
+
+Pipeline steps reported via `currentStep`: `"hydrating"` → `"analyzing"` → `"extracting_entries"` → `"creating_databases"` → `"populating"` → `"summarizing"` → `"done"`.
+
+**Response** (completed):
+```json
+{
+  "jobId": "a1b2c3d4-...",
+  "status": "completed",
+  "result": {
+    "databaseIds": {
+      "People": "db-id-1",
+      "Health & Medications": "db-id-2",
+      "Projects & Goals": "db-id-3"
+    },
+    "summaryPageUrl": "https://notion.so/abc123...",
+    "categoriesCount": 6,
+    "entriesCount": 42,
+    "durationMs": 185000.5
+  }
+}
+```
+
+**Response** (failed):
+```json
+{
+  "jobId": "a1b2c3d4-...",
+  "status": "failed",
+  "error": "Error message",
+  "code": "UPSTREAM_TIMEOUT"
+}
+```
+
+**404**: Job not found (never submitted, already consumed, or backend restarted).
+
+**Note**: Terminal states (`"completed"` or `"failed"`) remove the job from memory after the response is returned.
+
+---
+
+## Notion Export
+
+### Overview
+
+The Notion Export feature lets you export a user's entire knowledge graph into structured, browsable Notion databases. It reads the graph compilation from Neo4j, uses Gemini to dynamically design database schemas and extract entries, then creates everything in Notion under a parent page you specify.
+
+### How It Works
+
+```
+1. CLIENT
+   └─▶ POST /v1/notion/export
+       {userId, notionToken, pageName, language}
+
+2. ROUTE HANDLER (synchronous validation)
+   ├─▶ Validate notionToken by resolving pageName → pageId
+   ├─▶ Create job in memory store (status: "processing")
+   ├─▶ Launch background task (asyncio.create_task)
+   └─▶ Return 202 {jobId, pageId}
+
+3. BACKGROUND PIPELINE (NotionExportService)
+   │
+   ├─▶ Step 1: HYDRATE
+   │   └─▶ HydrationService.build_user_knowledge(userId, v1)
+   │       → Full graph compilation text from Neo4j
+   │
+   ├─▶ Step 2a: DESIGN SCHEMAS
+   │   └─▶ Gemini structured output (SchemaResult)
+   │       → 3-10 categories with column definitions
+   │
+   ├─▶ Step 2b: EXTRACT ENTRIES
+   │   └─▶ Gemini structured output (ExtractionResult) × N categories
+   │       → All rows for each category
+   │
+   ├─▶ Step 3: CREATE DATABASES
+   │   └─▶ Notion SDK (notion.request) × N categories
+   │       → One database per category under the parent page
+   │       → Each includes "Needs Review" + "Correction Notes" columns
+   │
+   ├─▶ Step 4: POPULATE (MCP agent)
+   │   └─▶ npx @notionhq/notion-mcp-server (stdio subprocess)
+   │       └─▶ ReAct agent creates rows via API-post-page
+   │           (batched, 12 rows per agent call)
+   │
+   └─▶ Step 5: SUMMARIZE (MCP agent)
+       └─▶ ReAct agent creates "Knowledge Graph Overview" page
+           with overview text, database links, and feedback instructions
+
+4. CLIENT (polling loop)
+   └─▶ GET /v1/notion/export/status/{jobId}
+       ├─▶ {status: "processing", progress: {currentStep, ...}} → poll again
+       ├─▶ {status: "completed", result: {databaseIds, summaryPageUrl, ...}}
+       └─▶ {status: "failed", error, code}
+```
+
+### Notion Setup
+
+1. **Create an internal integration** at https://www.notion.so/profile/integrations
+2. Copy the integration secret (starts with `ntn_`)
+3. Create a parent page in Notion (e.g. "Synapse")
+4. Share the page with your integration (page menu → "Connect to" → your integration)
+5. Use the page name as the `pageName` parameter in the API request
+
+### Example: Full Export Flow
+
+```bash
+# 1. Start the export
+curl -X POST http://localhost:8000/v1/notion/export \
+  -H "Content-Type: application/json" \
+  -H "X-API-SECRET: your_secret" \
+  -d '{
+    "userId": "user-123",
+    "notionToken": "ntn_your_token_here",
+    "pageName": "Synapse",
+    "language": "English"
+  }'
+# → 202 {"jobId": "abc-123", "status": "processing", "pageId": "..."}
+
+# 2. Poll for status (repeat until completed/failed)
+curl http://localhost:8000/v1/notion/export/status/abc-123 \
+  -H "X-API-SECRET: your_secret"
+# → {"jobId": "abc-123", "status": "processing", "progress": {"currentStep": "populating", ...}}
+
+# 3. Final result
+# → {"jobId": "abc-123", "status": "completed", "result": {"databaseIds": {...}, "summaryPageUrl": "https://notion.so/...", ...}}
+```
+
+### Prerequisites
+
+The Notion export pipeline spawns a Node.js MCP subprocess. The server environment needs:
+- **Node.js** (v18+) and **npx** available on `PATH`
+- Network access to `registry.npmjs.org` (first run downloads `@notionhq/notion-mcp-server`)
+
+### Axiom Observability
+
+The pipeline emits spans under the `export.*` attribute namespace:
+
+```apl
+['synapse-cortex-traces']
+| where startswith(name, 'notion_export.')
+| summarize
+    total = count(),
+    avg_duration = avg(['attributes.export.duration_ms']),
+    avg_categories = avg(['attributes.export.categories_count']),
+    avg_entries = avg(['attributes.export.entries_count']),
+    failed = countif(['attributes.operation.status'] == 'failed')
+  by bin_auto(_time)
+```
+
+Per-step latency breakdown:
+
+```apl
+['synapse-cortex-traces']
+| where startswith(name, 'notion_export.')
+| summarize
+    avg_ms = avg(['attributes.duration_ms']),
+    p95_ms = percentile(['attributes.duration_ms'], 95),
+    calls = count()
+  by name
+| order by avg_ms desc
+```
+
+---
+
 ## Data Flow
 
 ### Ingestion Pipeline (Async with Polling)
@@ -722,6 +962,7 @@ The API now emits structured OpenTelemetry attributes for request-level and serv
 - `rag.*`: GraphRAG gating, search latency, edge/node counts, dedup stats
 - `ingest.*`: job lifecycle, counts, processing metadata
 - `hydrate.*`: hydration request context and output size
+- `export.*`: Notion export pipeline steps, categories, entries, database counts
 - `graph.*`: graph retrieval/correction context and result counts
 - `db.*`: Neo4j query type, records returned, query latency
 - `upstream.*`: upstream status/error hints for Gemini and HTTP calls
@@ -807,6 +1048,7 @@ Slow Neo4j queries:
 ### Prerequisites
 
 - **Python**: 3.12+
+- **Node.js**: 18+ with `npx` on PATH (required for the Notion export MCP subprocess)
 - **Docker**: Latest stable version
 - **Docker Compose**: V2+
 - **Google Gemini API Key**: [Get one here](https://ai.google.dev/)

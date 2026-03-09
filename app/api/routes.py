@@ -4,11 +4,14 @@ API Routes - Endpoint definitions for Synapse Cortex.
 
 import logging
 import time
+import uuid
 
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from notion_client import AsyncClient as NotionAsyncClient
+from notion_client.client import ClientOptions
 from opentelemetry import trace
 
 from app.api.dependencies import (
@@ -18,6 +21,7 @@ from app.api.dependencies import (
     GraphServiceDep,
     HydrationServiceDep,
     IngestionServiceDep,
+    NotionExportServiceDep,
 )
 from app.core.observability import (
     anonymize_id,
@@ -38,6 +42,11 @@ from app.schemas.models import (
     IngestAcceptedResponse,
     IngestRequest,
     IngestStatusResponse,
+    NotionExportAcceptedResponse,
+    NotionExportProgress,
+    NotionExportRequest,
+    NotionExportResult,
+    NotionExportStatusResponse,
 )
 from app.services.hydration_result import CompilationMetadata
 from app.services.graph_rag import (
@@ -46,6 +55,12 @@ from app.services.graph_rag import (
     rag_outcome_to_usage_fields,
 )
 from app.services.job_store import get_job, remove_job
+from app.services.notion_export import resolve_notion_page_id
+from app.services.notion_export_job_store import (
+    create_notion_export_job,
+    get_notion_export_job,
+    remove_notion_export_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -474,3 +489,201 @@ async def correct_memory(
             error=str(e),
             code="MEMORY_CORRECTION_ERROR",
         )
+
+
+# =============================================================================
+# Notion Export
+# =============================================================================
+
+
+@router.post(
+    "/v1/notion/export",
+    response_model=NotionExportAcceptedResponse,
+    status_code=202,
+    tags=["Notion"],
+)
+async def start_notion_export(
+    request: NotionExportRequest,
+    _api_key: ApiKeyDep,
+    notion_export_service: NotionExportServiceDep,
+) -> NotionExportAcceptedResponse:
+    """
+    Export a user's knowledge graph into Notion databases.
+
+    Validates the Notion token and resolves the parent page synchronously,
+    then launches the multi-step pipeline as a background task.
+    Poll GET /v1/notion/export/status/{jobId} for progress and results.
+
+    Requires X-API-SECRET header for authentication.
+    """
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(
+        span,
+        {
+            "export.user_id": anonymize_id(request.userId),
+            "export.page_name": request.pageName,
+            "export.language": request.language,
+        },
+    )
+
+    # Validate the Notion token and resolve the parent page before accepting
+    try:
+        notion = NotionAsyncClient(
+            options=ClientOptions(
+                auth=request.notionToken,
+                notion_version="2022-06-28",
+            )
+        )
+        page_id = await resolve_notion_page_id(notion, request.pageName)
+    except ValueError as exc:
+        mark_span_error(
+            span,
+            exc,
+            category="validation",
+            code="NOTION_PAGE_NOT_FOUND",
+            extra_attributes={
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        mark_span_error(
+            span,
+            exc,
+            category="upstream",
+            code="NOTION_AUTH_ERROR",
+            extra_attributes={
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to connect to Notion. Check your token and page permissions.",
+        )
+
+    job_id = str(uuid.uuid4())
+    create_notion_export_job(job_id, user_id=request.userId, page_name=request.pageName)
+
+    notion_export_service.start_export(
+        job_id=job_id,
+        user_id=request.userId,
+        notion_token=request.notionToken,
+        page_name=request.pageName,
+        page_id=page_id,
+        language=request.language,
+    )
+
+    set_span_attributes(
+        span,
+        {
+            "export.job_id": job_id,
+            "export.page_id": page_id,
+            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+        },
+    )
+    mark_span_success(span)
+    return NotionExportAcceptedResponse(
+        jobId=job_id,
+        pageId=page_id,
+    )
+
+
+@router.get(
+    "/v1/notion/export/status/{job_id}",
+    response_model=NotionExportStatusResponse,
+    tags=["Notion"],
+)
+async def notion_export_status(
+    job_id: str,
+    _api_key: ApiKeyDep,
+) -> NotionExportStatusResponse:
+    """
+    Poll for Notion export job status.
+
+    Returns progress while processing, full result on completion.
+    Terminal states (completed/failed) remove the job from memory.
+    Returns 404 if the job is not found.
+
+    Requires X-API-SECRET header for authentication.
+    """
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(span, {"export.job_id": job_id})
+
+    job = get_notion_export_job(job_id)
+    if job is None:
+        mark_span_error(
+            span,
+            HTTPException(status_code=404, detail="Export job not found"),
+            category="validation",
+            code="EXPORT_JOB_NOT_FOUND",
+            extra_attributes={
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise HTTPException(status_code=404, detail="Export job not found")
+
+    set_span_attributes(
+        span,
+        {
+            "export.user_id": anonymize_id(job.user_id),
+            "export.status": job.status,
+            "export.current_step": job.current_step,
+        },
+    )
+
+    if job.status == "processing":
+        set_span_attributes(
+            span,
+            {"duration_ms": round((time.monotonic() - start) * 1000, 2)},
+        )
+        mark_span_success(span)
+        return NotionExportStatusResponse(
+            jobId=job_id,
+            status="processing",
+            progress=NotionExportProgress(
+                currentStep=job.current_step,
+                categoriesDesigned=job.categories_count,
+                entriesExtracted=job.entries_count,
+            ),
+        )
+
+    if job.status == "completed":
+        result = NotionExportResult(
+            databaseIds=job.database_ids or {},
+            summaryPageUrl=job.summary_page_url,
+            categoriesCount=job.categories_count or 0,
+            entriesCount=job.entries_count or 0,
+            durationMs=job.duration_ms or 0,
+        )
+        remove_notion_export_job(job_id)
+        set_span_attributes(
+            span,
+            {"duration_ms": round((time.monotonic() - start) * 1000, 2)},
+        )
+        mark_span_success(span)
+        return NotionExportStatusResponse(
+            jobId=job_id,
+            status="completed",
+            result=result,
+        )
+
+    # job.status == "failed"
+    error = job.error
+    code = job.code
+    remove_notion_export_job(job_id)
+    set_span_attributes(
+        span,
+        {
+            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            "error.code": code or "EXPORT_PROCESSING_ERROR",
+        },
+    )
+    mark_span_success(span, status="failed")
+    return NotionExportStatusResponse(
+        jobId=job_id,
+        status="failed",
+        error=error,
+        code=code,
+    )
