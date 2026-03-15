@@ -304,3 +304,56 @@ class NotionExportStatusResponse(BaseModel):
     result: NotionExportResult | None = None
     error: str | None = None
     code: str | None = None
+
+
+# =============================================================================
+# Notion Correction Import Models
+# =============================================================================
+
+
+class NotionCorrectionRequest(BaseModel):
+    """Request body for the POST /v1/notion/corrections endpoint."""
+
+    userId: str
+    notionToken: str = Field(..., description="Notion internal integration secret")
+    pageName: str = Field(..., description="Name of the parent Notion page containing exported databases")
+    language: str = Field(default="English", description="Language for extracted facts and summaries")
+
+
+class NotionCorrectionAcceptedResponse(BaseModel):
+    """202 response for POST /v1/notion/corrections (async fire-and-forget)."""
+
+    jobId: str
+    status: Literal["processing"] = "processing"
+    pageId: str = Field(..., description="Resolved Notion parent page ID")
+
+
+class NotionCorrectionProgress(BaseModel):
+    """Current pipeline progress included in correction status polling responses."""
+
+    currentStep: str
+    databasesScanned: int | None = None
+    correctionsFound: int | None = None
+    correctionsApplied: int | None = None
+    correctionsFailed: int | None = None
+
+
+class NotionCorrectionResult(BaseModel):
+    """Final result payload when the correction import completes successfully."""
+
+    correctionsFound: int
+    correctionsApplied: int
+    correctionsFailed: int
+    failedCorrections: list[dict] | None = None
+    durationMs: float
+
+
+class NotionCorrectionStatusResponse(BaseModel):
+    """Response for GET /v1/notion/corrections/status/{job_id}."""
+
+    jobId: str
+    status: Literal["processing", "completed", "failed"]
+    progress: NotionCorrectionProgress | None = None
+    result: NotionCorrectionResult | None = None
+    error: str | None = None
+    code: str | None = None

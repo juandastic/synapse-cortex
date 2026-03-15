@@ -398,6 +398,15 @@ class NotionExportService:
             ) as span:
                 pipeline_start = time.monotonic()
                 try:
+                    # Step 0: Clean existing content under the page
+                    notion = NotionAsyncClient(
+                        options=ClientOptions(
+                            auth=notion_token,
+                            notion_version="2022-06-28",
+                        )
+                    )
+                    await self._step_clean_page(notion, page_id)
+
                     # Step 1: Hydrate
                     compilation_text = await self._step_hydrate(job_id, user_id)
                     if not compilation_text:
@@ -416,14 +425,6 @@ class NotionExportService:
                     )
 
                     # Step 3: Create Notion databases
-                    # notion-client v3 defaults to API 2025-09-03 which removed
-                    # "properties" from database creation. Pin to 2022-06-28.
-                    notion = NotionAsyncClient(
-                        options=ClientOptions(
-                            auth=notion_token,
-                            notion_version="2022-06-28",
-                        )
-                    )
                     database_ids = await self._step_create_databases(
                         job_id, analysis, notion, page_id,
                     )
@@ -495,6 +496,53 @@ class NotionExportService:
                         "Notion export failed job=%s: %s", job_id, exc,
                         exc_info=True,
                     )
+
+    # ------------------------------------------------------------------
+    # Step 0: Clean existing content under the parent page
+    # ------------------------------------------------------------------
+
+    async def _step_clean_page(
+        self,
+        notion: NotionAsyncClient,
+        page_id: str,
+    ) -> None:
+        """Remove all child blocks under the parent page for a fresh export."""
+        with tracer.start_as_current_span("notion_export.clean_page") as span:
+            start = time.monotonic()
+            deleted = 0
+            has_more = True
+            start_cursor: str | None = None
+
+            while has_more:
+                response = await notion.blocks.children.list(
+                    block_id=page_id,
+                    start_cursor=start_cursor,
+                )
+                for block in response.get("results", []):
+                    block_id = block.get("id")
+                    if block_id:
+                        await notion.request(
+                            path=f"blocks/{block_id}",
+                            method="DELETE",
+                        )
+                        deleted += 1
+                        await asyncio.sleep(0.35)
+
+                has_more = response.get("has_more", False)
+                start_cursor = response.get("next_cursor")
+
+            set_span_attributes(
+                span,
+                {
+                    "export.blocks_deleted": deleted,
+                    "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                },
+            )
+            mark_span_success(span)
+            if deleted:
+                logger.info(
+                    "Cleaned %d blocks from page %s", deleted, page_id,
+                )
 
     # ------------------------------------------------------------------
     # Step 1: Hydrate the knowledge graph
@@ -871,7 +919,10 @@ class NotionExportService:
             summary_url: str | None = None
             if summary_page_id:
                 clean_id = summary_page_id.replace("-", "")
-                summary_url = f"https://notion.so/{clean_id}"
+                # Strip type prefixes returned by the MCP server (e.g. "lc_")
+                if "_" in clean_id:
+                    clean_id = clean_id.split("_")[-1]
+                summary_url = f"https://www.notion.so/{clean_id}"
 
             # Store the URL so the pipeline orchestrator can include it
             from app.services.notion_export_job_store import get_notion_export_job

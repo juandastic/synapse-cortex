@@ -15,6 +15,7 @@
 - [Technology Stack](#technology-stack)
 - [Observability in Axiom](#observability-in-axiom)
 - [Notion Export](#notion-export)
+- [Notion Correction Import](#notion-correction-import)
 - [Setup & Deployment](#setup--deployment)
 
 ---
@@ -70,10 +71,17 @@ The system is built on [Graphiti](https://github.com/getzep/graphiti), a tempora
 - **Dynamic Schema Design**: Gemini analyzes the graph and designs 3-10 category databases with optimal column schemas
 - **MCP Agent Integration**: Uses the Notion MCP server via `create_react_agent` for flexible row creation and page building
 - **Async with Polling**: Fire-and-forget pattern (202 + status polling) with step-level progress tracking
-- **Feedback Loop Columns**: Every database includes "Needs Review" (checkbox) and "Correction Notes" (rich_text) for future graph corrections
+- **Clean Page on Export**: Automatically removes all existing content under the parent page before each export
+- **Feedback Loop Columns**: Every database includes "Needs Review" (checkbox) and "Correction Notes" (rich_text) for corrections
 - **Per-Request Auth**: Notion token is passed per-request (not server-side) for multi-tenant use
 
-### 7. 🔐 Security & Rate Limiting
+### 7. 🔄 Notion Correction Import
+- **Feedback Loop**: Reads user corrections from exported Notion databases and applies them back to the knowledge graph
+- **Smart Row Updates**: MCP agent intelligently updates affected columns or deletes rows that are no longer relevant
+- **Graphiti Integration**: Uses `add_episode()` with `custom_extraction_instructions` to ensure corrections are language-consistent and properly contradict outdated edges
+- **Partial Failure Handling**: Individual correction failures don't block the pipeline; detailed failure reports included in the result
+
+### 8. 🔐 Security & Rate Limiting
 - **API Key Authentication**: All endpoints (except `/health`) require `X-API-SECRET` header
 - **Concurrency Control**: Configurable semaphore limits to avoid LLM rate limits (429 errors)
 - **CORS Middleware**: Supports cross-origin requests for web frontends
@@ -345,10 +353,11 @@ Instead of direct CRUD operations (which break embeddings), corrections are proc
 ### 6. **Notion Export Service** (`app/services/notion_export.py`)
 **Purpose**: Export a user's knowledge graph into structured Notion databases
 
-**Pipeline** (5 sequential steps, each with its own OTel span):
+**Pipeline** (6 sequential steps, each with its own OTel span):
 
 | Step | Name | Method | Description |
 |------|------|--------|-------------|
+| 0 | Clean Page | Notion SDK (`blocks.children.list` + `DELETE`) | Remove all existing content under the parent page |
 | 1 | Hydrate | `HydrationService.build_user_knowledge(v1)` | Build the full graph compilation from Neo4j |
 | 2a | Analyze Schemas | Gemini structured output (`SchemaResult`) | Design 3-10 category databases with column schemas |
 | 2b | Extract Entries | Gemini structured output (`ExtractionResult`) | Extract rows for each category (one LLM call per category) |
@@ -359,6 +368,24 @@ Instead of direct CRUD operations (which break embeddings), corrections are proc
 **MCP Lifecycle**: Steps 4-5 spawn a Node.js subprocess (`npx @notionhq/notion-mcp-server`) that communicates with Python via stdin/stdout JSON-RPC. The `async with stdio_client(...)` context manager handles startup, communication, and cleanup. A semaphore (`max_concurrent_exports=3`) limits concurrent subprocesses.
 
 **Job Store** (`app/services/notion_export_job_store.py`): Tracks `current_step`, `categories_count`, `entries_count`, `database_ids`, and `summary_page_url`. Same in-memory pattern as the ingest job store.
+
+### 7. **Notion Correction Service** (`app/services/notion_correction.py`)
+**Purpose**: Read user corrections from Notion and apply them back to the knowledge graph
+
+**Pipeline** (3 steps, each with its own OTel span):
+
+| Step | Name | Method | Description |
+|------|------|--------|-------------|
+| 0 | Discover Databases | Notion SDK (`blocks.children.list`) | Find all child databases under the parent page |
+| 1 | Scan Flagged Rows | Notion SDK (`databases/{id}/query`) | Query each database for rows with "Needs Review" checked |
+| 2a | Correct Graph | `graphiti.add_episode()` | Apply correction with `custom_extraction_instructions` for language + contradiction handling |
+| 2b | Update Notion Row | MCP agent (`create_react_agent`) | Intelligently update affected columns or delete the row if no longer relevant |
+
+**Correction Strategy**: Each correction is processed as a new Graphiti episode. The `custom_extraction_instructions` steer the LLM to extract only corrected facts (not the old state), and to write everything in the user's preferred language. Graphiti's built-in contradiction detection automatically invalidates outdated edges.
+
+**MCP Agent Decision**: The agent receives the full context (current properties, column schema, updated node summaries, new facts, invalidated facts) and chooses to either update the row or archive it.
+
+**Job Store** (`app/services/notion_correction_job_store.py`): Tracks `current_step`, `databases_scanned`, `corrections_found`, `corrections_applied`, `corrections_failed`, and `failed_corrections` (per-row error details).
 
 ---
 
@@ -697,6 +724,85 @@ Pipeline steps reported via `currentStep`: `"hydrating"` → `"analyzing"` → `
 
 ---
 
+#### 🔄 `POST /v1/notion/corrections`
+**Purpose**: Import user corrections from Notion databases back into the knowledge graph
+**Auth**: ✅ Required (`X-API-SECRET`)
+**Status**: `202 Accepted`
+**Request Body**:
+```json
+{
+  "userId": "user-123",
+  "notionToken": "ntn_your_token_here",
+  "pageName": "Synapse",
+  "language": "Spanish"
+}
+```
+
+**Response**:
+```json
+{
+  "jobId": "d1e2f3a4-...",
+  "status": "processing",
+  "pageId": "resolved-page-id"
+}
+```
+
+**Client Flow**: Poll `GET /v1/notion/corrections/status/{jobId}` for progress and results.
+
+---
+
+#### 📊 `GET /v1/notion/corrections/status/{job_id}`
+**Purpose**: Poll for Notion correction import job status
+**Auth**: ✅ Required (`X-API-SECRET`)
+
+**Response** (processing):
+```json
+{
+  "jobId": "d1e2f3a4-...",
+  "status": "processing",
+  "progress": {
+    "currentStep": "applying",
+    "databasesScanned": 7,
+    "correctionsFound": 3,
+    "correctionsApplied": 1,
+    "correctionsFailed": 0
+  }
+}
+```
+
+Pipeline steps reported via `currentStep`: `"scanning"` → `"applying"` → `"done"`.
+
+**Response** (completed):
+```json
+{
+  "jobId": "d1e2f3a4-...",
+  "status": "completed",
+  "result": {
+    "correctionsFound": 3,
+    "correctionsApplied": 2,
+    "correctionsFailed": 1,
+    "failedCorrections": [
+      {"category": "Medications", "title": "Aspirin", "error": "LLM rate limit exceeded"}
+    ],
+    "durationMs": 95000.5
+  }
+}
+```
+
+**Response** (failed):
+```json
+{
+  "jobId": "d1e2f3a4-...",
+  "status": "failed",
+  "error": "No databases found under the specified Notion page.",
+  "code": "NO_DATABASES"
+}
+```
+
+**Note**: Terminal states (`"completed"` or `"failed"`) remove the job from memory after the response is returned.
+
+---
+
 ## Notion Export
 
 ### Overview
@@ -717,6 +823,11 @@ The Notion Export feature lets you export a user's entire knowledge graph into s
    └─▶ Return 202 {jobId, pageId}
 
 3. BACKGROUND PIPELINE (NotionExportService)
+   │
+   ├─▶ Step 0: CLEAN PAGE
+   │   └─▶ List all child blocks under the parent page
+   │       └─▶ Delete each block (databases, summaries, etc.)
+   │           → Ensures a fresh page for every export
    │
    ├─▶ Step 1: HYDRATE
    │   └─▶ HydrationService.build_user_knowledge(userId, v1)
@@ -810,6 +921,126 @@ Per-step latency breakdown:
 ```apl
 ['synapse-cortex-traces']
 | where startswith(name, 'notion_export.')
+| summarize
+    avg_ms = avg(['attributes.duration_ms']),
+    p95_ms = percentile(['attributes.duration_ms'], 95),
+    calls = count()
+  by name
+| order by avg_ms desc
+```
+
+---
+
+## Notion Correction Import
+
+### Overview
+
+The Notion Correction Import feature closes the feedback loop: users flag incorrect data in the exported Notion databases, and the system reads those corrections, applies them to the knowledge graph, and intelligently updates or deletes the Notion rows.
+
+Each exported database includes two feedback columns:
+- **Needs Review** (checkbox): Flag a row that needs correction
+- **Correction Notes** (rich_text): Describe what needs to be fixed
+
+### How It Works
+
+```
+1. CLIENT
+   └─▶ POST /v1/notion/corrections
+       {userId, notionToken, pageName, language}
+
+2. ROUTE HANDLER (synchronous validation)
+   ├─▶ Validate notionToken by resolving pageName → pageId
+   ├─▶ Create job in memory store (status: "processing")
+   ├─▶ Launch background task (asyncio.create_task)
+   └─▶ Return 202 {jobId, pageId}
+
+3. BACKGROUND PIPELINE (NotionCorrectionService)
+   │
+   ├─▶ Step 0: DISCOVER DATABASES
+   │   └─▶ List child_database blocks under the parent page
+   │       → Map of category name → database ID
+   │
+   ├─▶ Step 1: SCAN FOR FLAGGED ROWS
+   │   └─▶ Query each database filtering "Needs Review" == true
+   │       └─▶ Extract property values, types, and correction notes
+   │           → List of CorrectionItems
+   │
+   └─▶ Step 2: APPLY CORRECTIONS (per row, sequentially)
+       │
+       ├─▶ 2a. CORRECT GRAPH (Graphiti)
+       │   └─▶ graphiti.add_episode() with:
+       │       - Episode body containing old properties + user correction
+       │       - custom_extraction_instructions for language + correction handling
+       │       → Returns AddEpisodeResults (updated nodes, edges, invalidated facts)
+       │
+       └─▶ 2b. UPDATE NOTION ROW (MCP agent)
+           └─▶ LangGraph ReAct agent with Notion MCP tools decides:
+               - OPTION A: Update row (patch affected properties, uncheck flag)
+               - OPTION B: Delete row (archive if entity is no longer relevant)
+               Agent receives: current properties, column schema, node summaries,
+               new facts, invalidated facts, and user correction notes.
+
+4. CLIENT (polling loop)
+   └─▶ GET /v1/notion/corrections/status/{jobId}
+       ├─▶ {status: "processing", progress: {currentStep, correctionsApplied, ...}}
+       ├─▶ {status: "completed", result: {correctionsFound, correctionsApplied, correctionsFailed, ...}}
+       └─▶ {status: "failed", error, code}
+```
+
+### Example: Full Correction Flow
+
+```bash
+# 1. Start the correction import
+curl -X POST http://localhost:8000/v1/notion/corrections \
+  -H "Content-Type: application/json" \
+  -H "X-API-SECRET: your_secret" \
+  -d '{
+    "userId": "user-123",
+    "notionToken": "ntn_your_token_here",
+    "pageName": "Synapse",
+    "language": "Spanish"
+  }'
+# → 202 {"jobId": "def-456", "status": "processing", "pageId": "..."}
+
+# 2. Poll for status
+curl http://localhost:8000/v1/notion/corrections/status/def-456 \
+  -H "X-API-SECRET: your_secret"
+# → {"status": "processing", "progress": {"currentStep": "applying", "correctionsApplied": 1, ...}}
+
+# 3. Final result
+# → {"status": "completed", "result": {"correctionsFound": 3, "correctionsApplied": 2, "correctionsFailed": 1, ...}}
+```
+
+### How the MCP Agent Decides
+
+The agent receives the full context of each correction and makes an intelligent decision:
+
+- **Update**: If the correction modifies specific facts (e.g., "the dosage changed to 20mg"), the agent patches the relevant columns while keeping unaffected properties intact
+- **Delete**: If the correction invalidates the entity entirely (e.g., "this concept is no longer relevant"), the agent archives the row
+
+The `language` parameter ensures all updated property values are written in the user's preferred language.
+
+### Axiom Observability
+
+The correction pipeline emits spans under the `correction.*` attribute namespace:
+
+```apl
+['synapse-cortex-traces']
+| where startswith(name, 'notion_correction.')
+| summarize
+    total = count(),
+    avg_duration = avg(['attributes.duration_ms']),
+    avg_found = avg(['attributes.correction.found']),
+    avg_applied = avg(['attributes.correction.applied']),
+    avg_failed = avg(['attributes.correction.failed'])
+  by bin_auto(_time)
+```
+
+Per-step breakdown (graph correction vs Notion row update):
+
+```apl
+['synapse-cortex-traces']
+| where startswith(name, 'notion_correction.')
 | summarize
     avg_ms = avg(['attributes.duration_ms']),
     p95_ms = percentile(['attributes.duration_ms'], 95),
@@ -963,6 +1194,7 @@ The API now emits structured OpenTelemetry attributes for request-level and serv
 - `ingest.*`: job lifecycle, counts, processing metadata
 - `hydrate.*`: hydration request context and output size
 - `export.*`: Notion export pipeline steps, categories, entries, database counts
+- `correction.*`: Notion correction import pipeline, corrections found/applied/failed
 - `graph.*`: graph retrieval/correction context and result counts
 - `db.*`: Neo4j query type, records returned, query latency
 - `upstream.*`: upstream status/error hints for Gemini and HTTP calls

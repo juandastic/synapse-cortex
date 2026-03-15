@@ -21,6 +21,7 @@ from app.api.dependencies import (
     GraphServiceDep,
     HydrationServiceDep,
     IngestionServiceDep,
+    NotionCorrectionServiceDep,
     NotionExportServiceDep,
 )
 from app.core.observability import (
@@ -42,6 +43,11 @@ from app.schemas.models import (
     IngestAcceptedResponse,
     IngestRequest,
     IngestStatusResponse,
+    NotionCorrectionAcceptedResponse,
+    NotionCorrectionProgress,
+    NotionCorrectionRequest,
+    NotionCorrectionResult,
+    NotionCorrectionStatusResponse,
     NotionExportAcceptedResponse,
     NotionExportProgress,
     NotionExportRequest,
@@ -56,6 +62,11 @@ from app.services.graph_rag import (
 )
 from app.services.job_store import get_job, remove_job
 from app.services.notion_export import resolve_notion_page_id
+from app.services.notion_correction_job_store import (
+    create_notion_correction_job,
+    get_notion_correction_job,
+    remove_notion_correction_job,
+)
 from app.services.notion_export_job_store import (
     create_notion_export_job,
     get_notion_export_job,
@@ -682,6 +693,202 @@ async def notion_export_status(
     )
     mark_span_success(span, status="failed")
     return NotionExportStatusResponse(
+        jobId=job_id,
+        status="failed",
+        error=error,
+        code=code,
+    )
+
+
+# =============================================================================
+# Notion Correction Import
+# =============================================================================
+
+
+@router.post(
+    "/v1/notion/corrections",
+    response_model=NotionCorrectionAcceptedResponse,
+    status_code=202,
+    tags=["Notion"],
+)
+async def start_notion_corrections(
+    request: NotionCorrectionRequest,
+    _api_key: ApiKeyDep,
+    notion_correction_service: NotionCorrectionServiceDep,
+) -> NotionCorrectionAcceptedResponse:
+    """
+    Import user corrections from Notion databases back into the knowledge graph.
+
+    Reads rows where "Needs Review" is checked, extracts correction notes,
+    and applies them via Graphiti's add_episode with contradiction detection.
+    Poll GET /v1/notion/corrections/status/{jobId} for progress and results.
+
+    Requires X-API-SECRET header for authentication.
+    """
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(
+        span,
+        {
+            "correction.user_id": anonymize_id(request.userId),
+            "correction.page_name": request.pageName,
+        },
+    )
+
+    # Validate the Notion token and resolve the parent page
+    try:
+        notion = NotionAsyncClient(
+            options=ClientOptions(
+                auth=request.notionToken,
+                notion_version="2022-06-28",
+            )
+        )
+        page_id = await resolve_notion_page_id(notion, request.pageName)
+    except ValueError as exc:
+        mark_span_error(
+            span,
+            exc,
+            category="validation",
+            code="NOTION_PAGE_NOT_FOUND",
+            extra_attributes={
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        mark_span_error(
+            span,
+            exc,
+            category="upstream",
+            code="NOTION_AUTH_ERROR",
+            extra_attributes={
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to connect to Notion. Check your token and page permissions.",
+        )
+
+    job_id = str(uuid.uuid4())
+    create_notion_correction_job(job_id, group_id=request.userId)
+
+    notion_correction_service.start_import(
+        job_id=job_id,
+        group_id=request.userId,
+        notion_token=request.notionToken,
+        page_id=page_id,
+        page_name=request.pageName,
+        language=request.language,
+    )
+
+    set_span_attributes(
+        span,
+        {
+            "correction.job_id": job_id,
+            "correction.page_id": page_id,
+            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+        },
+    )
+    mark_span_success(span)
+    return NotionCorrectionAcceptedResponse(jobId=job_id, pageId=page_id)
+
+
+@router.get(
+    "/v1/notion/corrections/status/{job_id}",
+    response_model=NotionCorrectionStatusResponse,
+    tags=["Notion"],
+)
+async def notion_correction_status(
+    job_id: str,
+    _api_key: ApiKeyDep,
+) -> NotionCorrectionStatusResponse:
+    """
+    Poll for Notion correction import job status.
+
+    Returns progress while processing, full result on completion.
+    Terminal states (completed/failed) remove the job from memory.
+    Returns 404 if the job is not found.
+
+    Requires X-API-SECRET header for authentication.
+    """
+    span = trace.get_current_span()
+    start = time.monotonic()
+    set_span_attributes(span, {"correction.job_id": job_id})
+
+    job = get_notion_correction_job(job_id)
+    if job is None:
+        mark_span_error(
+            span,
+            HTTPException(status_code=404, detail="Correction job not found"),
+            category="validation",
+            code="CORRECTION_JOB_NOT_FOUND",
+            extra_attributes={
+                "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            },
+        )
+        raise HTTPException(status_code=404, detail="Correction job not found")
+
+    set_span_attributes(
+        span,
+        {
+            "correction.group_id": anonymize_id(job.group_id),
+            "correction.status": job.status,
+            "correction.current_step": job.current_step,
+        },
+    )
+
+    if job.status == "processing":
+        set_span_attributes(
+            span,
+            {"duration_ms": round((time.monotonic() - start) * 1000, 2)},
+        )
+        mark_span_success(span)
+        return NotionCorrectionStatusResponse(
+            jobId=job_id,
+            status="processing",
+            progress=NotionCorrectionProgress(
+                currentStep=job.current_step,
+                databasesScanned=job.databases_scanned,
+                correctionsFound=job.corrections_found,
+                correctionsApplied=job.corrections_applied,
+                correctionsFailed=job.corrections_failed,
+            ),
+        )
+
+    if job.status == "completed":
+        result = NotionCorrectionResult(
+            correctionsFound=job.corrections_found or 0,
+            correctionsApplied=job.corrections_applied or 0,
+            correctionsFailed=job.corrections_failed or 0,
+            failedCorrections=job.failed_corrections,
+            durationMs=job.duration_ms or 0,
+        )
+        remove_notion_correction_job(job_id)
+        set_span_attributes(
+            span,
+            {"duration_ms": round((time.monotonic() - start) * 1000, 2)},
+        )
+        mark_span_success(span)
+        return NotionCorrectionStatusResponse(
+            jobId=job_id,
+            status="completed",
+            result=result,
+        )
+
+    # job.status == "failed"
+    error = job.error
+    code = job.code
+    remove_notion_correction_job(job_id)
+    set_span_attributes(
+        span,
+        {
+            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+            "error.code": code or "CORRECTION_PROCESSING_ERROR",
+        },
+    )
+    mark_span_success(span, status="failed")
+    return NotionCorrectionStatusResponse(
         jobId=job_id,
         status="failed",
         error=error,

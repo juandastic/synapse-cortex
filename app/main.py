@@ -22,6 +22,7 @@ from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
+from app.services.notion_correction import NotionCorrectionService
 from app.services.notion_export import NotionExportService
 
 # Configure logging
@@ -97,6 +98,10 @@ async def lifespan(app: FastAPI):
         hydration_service=hydration_service,
         google_api_key=settings.google_api_key,
     )
+    notion_correction_service = NotionCorrectionService(
+        graphiti=graphiti,
+        google_api_key=settings.google_api_key,
+    )
 
     # Store in app state for dependency injection
     app.state.neo4j_driver = neo4j_driver
@@ -106,6 +111,7 @@ async def lifespan(app: FastAPI):
     app.state.generation_service = generation_service
     app.state.graph_service = graph_service
     app.state.notion_export_service = notion_export_service
+    app.state.notion_correction_service = notion_correction_service
 
     logger.info("Synapse Cortex started successfully")
 
