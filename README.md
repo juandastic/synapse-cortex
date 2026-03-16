@@ -17,6 +17,7 @@
 - [Notion Export](#notion-export)
 - [Notion Correction Import](#notion-correction-import)
 - [Setup & Deployment](#setup--deployment)
+- [Demo User Seeding](#demo-user-seeding)
 
 ---
 
@@ -1484,4 +1485,77 @@ docker run --rm \
 # Restart services
 docker-compose up -d
 ```
+
+---
+
+## Demo User Seeding
+
+Pre-populates a demo account with a realistic knowledge graph so visitors can explore the app with an already-formed graph, existing conversation history, and features like Notion export — without running any live conversations.
+
+The token cost is paid **once** (ingesting conversations through Graphiti). Subsequent resets are **free** (direct Neo4j batch insert, no LLM calls).
+
+### Files
+
+```
+scripts/
+  seed_demo.json              # Source conversations (generated in AI Studio, do not modify)
+  ingest_demo.py              # Step 1: runs Graphiti on the conversations → builds graph
+  export_demo_graph.py        # Step 2: exports graph snapshot → seed_data/demo_graph.json
+  reset_demo.py               # Step 3: resets a group_id from the snapshot (repeatable)
+  seed_data/
+    demo_graph.json           # Committed graph snapshot with DEMO_PLACEHOLDER group_id
+```
+
+### How it works
+
+The `group_id` (Clerk user ID) is dynamic per environment, so the snapshot stores `DEMO_PLACEHOLDER` as the group_id value. At reset time, `reset_demo.py` substitutes it with the actual Clerk user ID before inserting.
+
+### Step 1 — Ingest (once, costs tokens)
+
+Reads `seed_demo.json` and calls `graphiti.add_episode()` for each session. Takes several minutes depending on session count and rate limits.
+
+```bash
+python scripts/ingest_demo.py
+# Uses group_id: demo_seed_YYYYMMDD by default
+
+python scripts/ingest_demo.py --group-id my_custom_group
+```
+
+### Step 2 — Export snapshot (once, free)
+
+Exports all Entity/Episodic nodes and RELATES_TO/MENTIONS edges into `scripts/seed_data/demo_graph.json`. Use `--delete-after` to clean up the temporary group_id from Neo4j.
+
+```bash
+python scripts/export_demo_graph.py --group-id demo_seed_YYYYMMDD --delete-after
+```
+
+Commit `scripts/seed_data/demo_graph.json` — this is the reusable snapshot.
+
+### Step 3 — Reset (free, repeatable)
+
+Deletes existing graph data for the demo account and re-inserts from the snapshot. Run this whenever you want to restore the demo to its initial state.
+
+```bash
+# Dry run to preview what will happen
+python scripts/reset_demo.py --group-id <clerk_user_id> --dry-run
+
+# Apply
+python scripts/reset_demo.py --group-id <clerk_user_id>
+```
+
+### Verify
+
+```bash
+python scripts/console.py
+# In the REPL:
+# g = await graph_service.get_graph("<clerk_user_id>")
+# len(g.nodes), len(g.links)
+```
+
+### Updating the demo data
+
+To replace the demo content entirely:
+1. Edit or regenerate `scripts/seed_demo.json`
+2. Re-run Steps 1–2 with a new temporary group_id
+3. Commit the updated `scripts/seed_data/demo_graph.json`
 
