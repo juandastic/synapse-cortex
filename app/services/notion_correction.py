@@ -339,7 +339,7 @@ class NotionCorrectionService:
                         return
 
                     applied, failed, failed_list = await self._step_apply(
-                        job_id, notion_token, correction_items,
+                        job_id, notion, notion_token, correction_items,
                         group_id, language,
                     )
 
@@ -561,6 +561,7 @@ class NotionCorrectionService:
     async def _step_apply(
         self,
         job_id: str,
+        notion: NotionAsyncClient,
         notion_token: str,
         items: list[CorrectionItem],
         group_id: str,
@@ -585,6 +586,7 @@ class NotionCorrectionService:
                         await self._update_notion_row(
                             agent, item, episode_result, language,
                         )
+                        await self._reset_review_fields(notion, item.page_id)
                         applied += 1
                     except Exception as exc:
                         failed += 1
@@ -729,6 +731,29 @@ class NotionCorrectionService:
                 category, code = classify_error(exc)
                 mark_span_error(span, exc, category=category, code=code)
                 raise
+
+    async def _reset_review_fields(
+        self,
+        notion: NotionAsyncClient,
+        page_id: str,
+    ) -> None:
+        """Reset 'Needs Review' and 'Correction Notes' via the Notion SDK.
+
+        This guarantees the fields are cleared regardless of whether the MCP
+        agent included the reset in its update call.
+        """
+        await notion.request(
+            path=f"pages/{page_id}",
+            method="PATCH",
+            body={
+                "properties": {
+                    "Needs Review": {"checkbox": False},
+                    "Correction Notes": {
+                        "rich_text": [],
+                    },
+                },
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

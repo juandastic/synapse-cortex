@@ -167,7 +167,7 @@ column schemas.
 2. Section 1 ("CONCEPTUAL DEFINITIONS & IDENTITY") contains entity \
 definitions — use these for most categories.
 3. Section 2 ("RELATIONAL DYNAMICS & CAUSALITY") contains relationships — \
-use this context to enrich definitions or dected events and connections between entities \
+use this context to enrich definitions or detected events and connections between entities \
 do not create a dedicated relationships
 4. The overview should summarize the knowledge graph comprehensively.
 
