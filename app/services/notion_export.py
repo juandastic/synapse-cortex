@@ -167,8 +167,8 @@ column schemas.
 2. Section 1 ("CONCEPTUAL DEFINITIONS & IDENTITY") contains entity \
 definitions — use these for most categories.
 3. Section 2 ("RELATIONAL DYNAMICS & CAUSALITY") contains relationships — \
-create a dedicated relationships category with a schema that captures the \
-subject, object, type, and context of each relationship.
+use this context to enrich definitions or dected events and connections between entities \
+do not create a dedicated relationships
 4. The overview should summarize the knowledge graph comprehensively.
 
 <knowledge_graph_compilation>
