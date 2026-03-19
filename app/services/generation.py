@@ -59,8 +59,10 @@ class GenerationService:
         start_total = time.monotonic()
         first_chunk_latency_ms: float | None = None
         chunk_count = 0
+        raw_chunk_count = 0
         response_chars = 0
         finish_reason = "stop"
+        seen_finish_reasons: list[str] = []
         tracer = trace.get_tracer(__name__)
 
         with tracer.start_as_current_span(
@@ -117,6 +119,8 @@ class GenerationService:
                             },
                         )
 
+                    raw_chunk_count += 1
+
                     # Capture usage_metadata from each chunk; the last one is definitive
                     if chunk.usage_metadata:
                         usage_metadata = chunk.usage_metadata
@@ -124,6 +128,15 @@ class GenerationService:
                     chunk_finish_reason = self._extract_finish_reason(chunk)
                     if chunk_finish_reason:
                         finish_reason = chunk_finish_reason
+                        if chunk_finish_reason not in seen_finish_reasons:
+                            seen_finish_reasons.append(chunk_finish_reason)
+                            # Emit an event for any non-stop finish reason so it's
+                            # immediately visible in the trace timeline.
+                            if chunk_finish_reason not in ("stop", "unspecified"):
+                                span.add_event(
+                                    "non_stop_finish_reason",
+                                    {"finish_reason": chunk_finish_reason},
+                                )
 
                     if chunk.text:
                         chunk_count += 1
@@ -182,16 +195,52 @@ class GenerationService:
 
                 # Send the done marker
                 yield "data: [DONE]\n\n"
+                empty_response = chunk_count == 0 and raw_chunk_count > 0
+                thoughts_tokens = (
+                    getattr(usage_metadata, "thoughts_token_count", None)
+                    if usage_metadata
+                    else None
+                )
+                # Distinguish None (model doesn't support thinking) from 0
+                # (thinking model stopped before generating any thoughts — hard stop signal).
+                thoughts_tokens_reported = thoughts_tokens is not None
+                empty_response_type = None
+                if empty_response:
+                    if thoughts_tokens_reported and thoughts_tokens == 0:
+                        empty_response_type = "pre_generation_hard_stop"
+                    elif thoughts_tokens_reported and thoughts_tokens > 0:
+                        empty_response_type = "thinking_only"
+                    else:
+                        empty_response_type = "unknown"
+
                 set_span_attributes(
                     span,
                     {
                         "chat.phase": "finalize",
                         "chat.finish_reason": finish_reason,
+                        "chat.finish_reasons_seen": ",".join(seen_finish_reasons) if seen_finish_reasons else finish_reason,
                         "chat.stream_chunks_count": chunk_count,
+                        "chat.stream_raw_chunks_count": raw_chunk_count,
                         "chat.response_chars": response_chars,
+                        "chat.empty_response": empty_response,
+                        "chat.empty_response_type": empty_response_type,
                         "chat.total_duration_ms": round((time.monotonic() - start_total) * 1000, 2),
                     },
                 )
+                # Emit a dedicated event when the model responded but sent no text —
+                # makes empty-response traces easy to filter and alert on.
+                if empty_response:
+                    span.add_event(
+                        "empty_response_detected",
+                        {
+                            "raw_chunks": raw_chunk_count,
+                            "finish_reason": finish_reason,
+                            "prompt_tokens": usage_metadata.prompt_token_count if usage_metadata else 0,
+                            "thoughts_tokens": thoughts_tokens if thoughts_tokens is not None else -1,
+                            "thoughts_tokens_reported": thoughts_tokens_reported,
+                            "empty_response_type": empty_response_type,
+                        },
+                    )
                 mark_span_success(span)
 
             except Exception as e:
