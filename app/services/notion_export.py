@@ -21,7 +21,6 @@ import os
 import time
 from typing import Any
 
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -32,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from langchain_mcp_adapters.tools import load_mcp_tools
 
+from app.core.config import Settings, create_langchain_llm
 from app.core.observability import (
     anonymize_id,
     classify_error,
@@ -341,11 +341,11 @@ class NotionExportService:
     def __init__(
         self,
         hydration_service: HydrationService,
-        google_api_key: str,
+        settings: Settings,
         max_concurrent_exports: int = 3,
     ):
         self._hydration = hydration_service
-        self._google_api_key = google_api_key
+        self._settings = settings
         self._semaphore = asyncio.Semaphore(max_concurrent_exports)
 
     # ------------------------------------------------------------------
@@ -581,10 +581,8 @@ class NotionExportService:
     ) -> dict:
         update_notion_export_step(job_id, "analyzing")
 
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.2,
-            google_api_key=self._google_api_key,
+        llm = create_langchain_llm(
+            self._settings, model="gemini-2.5-flash", temperature=0.2,
         )
 
         # Phase 2a: Design schemas
@@ -750,10 +748,8 @@ class NotionExportService:
                 await mcp_session.initialize()
                 tools = await load_mcp_tools(mcp_session)
 
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
-                    temperature=0.2,
-                    google_api_key=self._google_api_key,
+                llm = create_langchain_llm(
+                    self._settings, model="gemini-2.5-flash", temperature=0.2,
                 )
                 agent = create_react_agent(llm, tools)
 

@@ -16,7 +16,7 @@ from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerCli
 from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
-from app.core.config import get_settings
+from app.core.config import create_genai_client, get_settings
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
@@ -58,28 +58,25 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to connect to Neo4j: {e}")
         raise
 
+    # Create shared google-genai client (Vertex AI or AI Studio based on env vars)
+    genai_client = create_genai_client(settings)
+
     # Initialize Graphiti with Gemini clients
     graphiti = Graphiti(
         settings.neo4j_uri,
         settings.neo4j_user,
         settings.neo4j_password,
         llm_client=GeminiClient(
-            config=LLMConfig(
-                api_key=settings.google_api_key,
-                model=settings.graphiti_model,
-            )
+            config=LLMConfig(model=settings.graphiti_model),
+            client=genai_client,
         ),
         embedder=GeminiEmbedder(
-            config=GeminiEmbedderConfig(
-                api_key=settings.google_api_key,
-                embedding_model="gemini-embedding-001",
-            )
+            config=GeminiEmbedderConfig(embedding_model="gemini-embedding-001"),
+            client=genai_client,
         ),
         cross_encoder=GeminiRerankerClient(
-            config=LLMConfig(
-                api_key=settings.google_api_key,
-                model=settings.graphiti_model,
-            )
+            config=LLMConfig(model=settings.graphiti_model),
+            client=genai_client,
         ),
         max_coroutines=settings.semaphore_limit,
     )
@@ -92,15 +89,15 @@ async def lifespan(app: FastAPI):
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
     ingestion_service = IngestionService(graphiti, settings.graphiti_model)
-    generation_service = GenerationService(settings.google_api_key)
+    generation_service = GenerationService(genai_client)
     graph_service = GraphService(neo4j_driver, graphiti)
     notion_export_service = NotionExportService(
         hydration_service=hydration_service,
-        google_api_key=settings.google_api_key,
+        settings=settings,
     )
     notion_correction_service = NotionCorrectionService(
         graphiti=graphiti,
-        google_api_key=settings.google_api_key,
+        settings=settings,
     )
 
     # Store in app state for dependency injection

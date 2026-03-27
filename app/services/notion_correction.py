@@ -25,7 +25,6 @@ from typing import Any
 from graphiti_core import Graphiti
 from graphiti_core.graphiti import AddEpisodeResults
 from graphiti_core.nodes import EpisodeType
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.prebuilt import create_react_agent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -35,6 +34,7 @@ from opentelemetry import trace
 
 from langchain_mcp_adapters.tools import load_mcp_tools
 
+from app.core.config import Settings, create_langchain_llm
 from app.core.observability import (
     anonymize_id,
     classify_error,
@@ -242,11 +242,11 @@ class NotionCorrectionService:
     def __init__(
         self,
         graphiti: Graphiti,
-        google_api_key: str,
+        settings: Settings,
         max_concurrent_imports: int = 3,
     ):
         self._graphiti = graphiti
-        self._google_api_key = google_api_key
+        self._settings = settings
         self._semaphore = asyncio.Semaphore(max_concurrent_imports)
 
     # ------------------------------------------------------------------
@@ -634,7 +634,7 @@ class NotionCorrectionService:
                 await agent.astream(...)
         """
         return _NotionAgentContext(
-            google_api_key=self._google_api_key,
+            settings=self._settings,
             notion_token=notion_token,
         )
 
@@ -764,8 +764,8 @@ class NotionCorrectionService:
 class _NotionAgentContext:
     """Async context manager that manages the Notion MCP server lifecycle."""
 
-    def __init__(self, google_api_key: str, notion_token: str):
-        self._google_api_key = google_api_key
+    def __init__(self, settings: Settings, notion_token: str):
+        self._settings = settings
         self._notion_token = notion_token
         self._stdio_cm: Any = None
         self._session_cm: Any = None
@@ -784,10 +784,8 @@ class _NotionAgentContext:
         await session.initialize()
         tools = await load_mcp_tools(session)
 
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            temperature=0.2,
-            google_api_key=self._google_api_key,
+        llm = create_langchain_llm(
+            self._settings, model="gemini-2.5-flash", temperature=0.2,
         )
         return create_react_agent(llm, tools)
 

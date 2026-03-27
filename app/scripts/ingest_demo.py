@@ -26,7 +26,7 @@ from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
 from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
 from graphiti_core.nodes import EpisodeType
 
-from app.core.config import get_settings
+from app.core.config import create_genai_client, get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -35,21 +35,22 @@ SEED_FILE = Path(__file__).parent / "seed_demo.json"
 
 
 def make_graphiti(settings) -> Graphiti:
+    genai_client = create_genai_client(settings)
     return Graphiti(
         settings.neo4j_uri,
         settings.neo4j_user,
         settings.neo4j_password,
         llm_client=GeminiClient(
-            config=LLMConfig(api_key=settings.google_api_key, model=settings.graphiti_model)
+            config=LLMConfig(model=settings.graphiti_model),
+            client=genai_client,
         ),
         embedder=GeminiEmbedder(
-            config=GeminiEmbedderConfig(
-                api_key=settings.google_api_key,
-                embedding_model="gemini-embedding-001",
-            )
+            config=GeminiEmbedderConfig(embedding_model="gemini-embedding-001"),
+            client=genai_client,
         ),
         cross_encoder=GeminiRerankerClient(
-            config=LLMConfig(api_key=settings.google_api_key, model=settings.graphiti_model)
+            config=LLMConfig(model=settings.graphiti_model),
+            client=genai_client,
         ),
         max_coroutines=settings.semaphore_limit,
     )

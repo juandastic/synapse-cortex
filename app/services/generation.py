@@ -39,8 +39,8 @@ logger = logging.getLogger(__name__)
 class GenerationService:
     """Service for generating chat completions using Google Gemini."""
 
-    def __init__(self, api_key: str):
-        self._client = genai.Client(api_key=api_key)
+    def __init__(self, client: genai.Client):
+        self._client = client
 
     async def stream_chat_completion(
         self, request: ChatCompletionRequest

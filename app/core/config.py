@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from google import genai
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,8 +12,9 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str
 
-    # Google Gemini API
-    google_api_key: str
+    # Google Gemini API — set ONE of these. Vertex AI is preferred (uses GCP credits).
+    vertex_api_key: str = ""
+    google_api_key: str = ""
 
     # Graphiti LLM Configuration
     graphiti_model: str = "gemini-3-flash-preview"
@@ -45,3 +47,36 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+
+
+def create_genai_client(settings: Settings) -> genai.Client:
+    """Create a google-genai Client using Vertex AI or AI Studio based on env vars."""
+    if settings.vertex_api_key:
+        print("Using Vertex API Key")
+        return genai.Client(
+            vertexai=True,
+            api_key=settings.vertex_api_key,
+        )
+    if settings.google_api_key:
+        print("Using Google API Key")
+        return genai.Client(api_key=settings.google_api_key)
+    raise ValueError("Set VERTEX_API_KEY or GOOGLE_API_KEY in .env")
+
+
+def create_langchain_llm(settings: Settings, **kwargs):
+    """Create a LangChain chat model using Vertex AI or AI Studio based on env vars."""
+    if settings.vertex_api_key:
+        from langchain_google_vertexai import ChatVertexAI
+
+        return ChatVertexAI(
+            api_key=settings.vertex_api_key,
+            **kwargs,
+        )
+    if settings.google_api_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(
+            google_api_key=settings.google_api_key,
+            **kwargs,
+        )
+    raise ValueError("Set VERTEX_API_KEY or GOOGLE_API_KEY in .env")
