@@ -4,6 +4,22 @@
 
 ---
 
+## The Story Behind the Project
+
+This project was built in public and documented through a series of articles that cover the motivation, architecture decisions, and evolution of the system:
+
+1. **[Beyond RAG: Building an AI Companion with Deep Memory Using Knowledge Graphs](https://dev.to/juandastic/beyond-rag-building-an-ai-companion-with-deep-memory-using-knowledge-graphs-2e6e)** — The origin story: why traditional RAG wasn't enough and how knowledge graphs became the foundation for long-term AI memory.
+2. **[Scaling AI Memory: How I Tamed a 120K Token Prompt with Deterministic GraphRAG](https://dev.to/juandastic/scaling-ai-memory-how-i-tamed-a-120k-token-prompt-with-deterministic-graphrag-4f85)** — The scaling challenge: how the system evolved to handle growing knowledge graphs without blowing up context windows.
+3. **[Full Circle: Giving My AI's Knowledge Graph a Notion Interface Using MCP](https://dev.to/juandastic/full-circle-giving-my-ais-knowledge-graph-a-notion-interface-using-mcp-2dmp)** — Closing the loop: connecting the knowledge graph to Notion via MCP for a human-friendly interface to the AI's memory.
+
+If you want to understand the *why* behind the architecture and design choices in this repo, start with those articles.
+
+### Frontend
+
+The chat interface that connects to this backend lives in a separate repository: **[synapse-chat-ai](https://github.com/juandastic/synapse-chat-ai)**. Together, they form the complete Synapse system — the frontend handles the conversational UI while this backend powers the knowledge graph and memory layer.
+
+---
+
 ## 📋 Table of Contents
 
 - [Overview](#overview)
