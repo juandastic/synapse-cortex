@@ -31,6 +31,7 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
+from app.core.posthog import capture_trace, new_trace_id
 from app.schemas.models import (
     ChatCompletionRequest,
     CompilationMetadataResponse,
@@ -364,6 +365,14 @@ async def chat_completions(
             "chat.compilation.nodes_count": len(cm.included_node_ids),
             "chat.compilation.edges_count": len(cm.included_edge_ids),
         }
+
+    # --- PostHog trace: emit early so RAG span and generation group under it ---
+    request.posthog_trace_id = new_trace_id()
+    capture_trace(
+        request.user_id or "anonymous",
+        request.posthog_trace_id,
+        name="chat_completion",
+    )
 
     # --- GraphRAG Context Retrieval ---
     rag_outcome = await maybe_run_graph_rag(request, graphiti)

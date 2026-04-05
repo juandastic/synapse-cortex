@@ -42,6 +42,7 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
+from app.core.posthog import capture_span, capture_trace, new_trace_id, posthog_user_context
 from app.services.notion_correction_job_store import (
     complete_notion_correction_job,
     fail_notion_correction_job,
@@ -285,6 +286,7 @@ class NotionCorrectionService:
         page_id: str,
         language: str = "English",
     ) -> None:
+        posthog_trace_id = new_trace_id()
         async with self._semaphore:
             with tracer.start_as_current_span(
                 "notion_correction.run_pipeline",
@@ -341,6 +343,7 @@ class NotionCorrectionService:
                     applied, failed, failed_list = await self._step_apply(
                         job_id, notion, notion_token, correction_items,
                         group_id, language,
+                        posthog_trace_id=posthog_trace_id,
                     )
 
                     duration_ms = round(
@@ -364,6 +367,19 @@ class NotionCorrectionService:
                         },
                     )
                     mark_span_success(span)
+
+                    # PostHog LLM Analytics
+                    capture_trace(
+                        group_id,
+                        posthog_trace_id,
+                        name="notion_correction",
+                        properties={
+                            "pipeline": "notion_correction",
+                            "corrections_found": len(correction_items),
+                            "corrections_applied": applied,
+                            "corrections_failed": failed,
+                        },
+                    )
 
                 except Exception as exc:
                     category, code = classify_error(exc)
@@ -566,6 +582,7 @@ class NotionCorrectionService:
         items: list[CorrectionItem],
         group_id: str,
         language: str = "English",
+        posthog_trace_id: str = "",
     ) -> tuple[int, int, list[dict]]:
         update_notion_correction_step(
             job_id, "applying", corrections_found=len(items),
@@ -579,6 +596,7 @@ class NotionCorrectionService:
 
             async with self._create_notion_agent(notion_token) as agent:
                 for item in items:
+                    item_start = time.monotonic()
                     try:
                         episode_result = await self._correct_graph(
                             item, group_id, language,
@@ -588,6 +606,16 @@ class NotionCorrectionService:
                         )
                         await self._reset_review_fields(notion, item.page_id)
                         applied += 1
+
+                        # PostHog LLM Analytics
+                        capture_span(
+                            group_id,
+                            posthog_trace_id,
+                            name="correction.apply_item",
+                            input_data=f"{item.category_name}/{item.title}: {item.correction_notes}"[:1000],
+                            output_data=f"{len(episode_result.nodes)} nodes, {len(episode_result.edges)} edges",
+                            duration_ms=(time.monotonic() - item_start) * 1000,
+                        )
                     except Exception as exc:
                         failed += 1
                         failed_list.append(
@@ -669,17 +697,18 @@ class NotionCorrectionService:
                     item.title,
                     item.page_id,
                 )
-                result = await self._graphiti.add_episode(
-                    name="notion_correction",
-                    episode_body=episode_body,
-                    source=EpisodeType.text,
-                    source_description=(
-                        f"User correction from Notion review ({item.category_name})"
-                    ),
-                    group_id=group_id,
-                    reference_time=datetime.now(),
-                    custom_extraction_instructions=extraction_instructions,
-                )
+                with posthog_user_context(group_id):
+                    result = await self._graphiti.add_episode(
+                        name="notion_correction",
+                        episode_body=episode_body,
+                        source=EpisodeType.text,
+                        source_description=(
+                            f"User correction from Notion review ({item.category_name})"
+                        ),
+                        group_id=group_id,
+                        reference_time=datetime.now(),
+                        custom_extraction_instructions=extraction_instructions,
+                    )
                 set_span_attributes(
                     span,
                     {

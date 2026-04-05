@@ -132,6 +132,7 @@ class ChatCompletionRequest(BaseModel):
     compilationMetadata: CompilationMetadataResponse | None = None
     user_id: str | None = Field(default=None, description="User/group ID for GraphRAG context retrieval")
     rag_usage_fields: dict[str, object] = Field(default_factory=dict, exclude=True)
+    posthog_trace_id: str = Field(default="", exclude=True)
 
 
 class ChatCompletionDelta(BaseModel):

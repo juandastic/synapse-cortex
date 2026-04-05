@@ -39,6 +39,7 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
+from app.core.posthog import capture_generation, capture_span, capture_trace, new_trace_id
 from app.services.hydration import HydrationService
 from app.services.notion_export_job_store import (
     complete_notion_export_job,
@@ -386,6 +387,7 @@ class NotionExportService:
         page_id: str,
         language: str,
     ) -> None:
+        posthog_trace_id = new_trace_id()
         async with self._semaphore:
             with tracer.start_as_current_span(
                 "notion_export.run_pipeline",
@@ -422,6 +424,8 @@ class NotionExportService:
                     # Step 2: Analyze (schema design + entry extraction)
                     analysis = await self._step_analyze(
                         job_id, compilation_text, language,
+                        posthog_trace_id=posthog_trace_id,
+                        user_id=user_id,
                     )
 
                     # Step 3: Create Notion databases
@@ -482,6 +486,18 @@ class NotionExportService:
                         len(analysis["categories"]),
                         total_entries,
                         duration_ms,
+                    )
+
+                    # PostHog LLM Analytics
+                    capture_trace(
+                        user_id,
+                        posthog_trace_id,
+                        name="notion_export",
+                        properties={
+                            "pipeline": "notion_export",
+                            "categories_count": len(analysis["categories"]),
+                            "entries_count": total_entries,
+                        },
                     )
 
                 except Exception as exc:
@@ -578,6 +594,8 @@ class NotionExportService:
         job_id: str,
         compilation_text: str,
         language: str,
+        posthog_trace_id: str = "",
+        user_id: str = "",
     ) -> dict:
         update_notion_export_step(job_id, "analyzing")
 
@@ -590,22 +608,33 @@ class NotionExportService:
             "notion_export.analyze_schemas",
         ) as span:
             start = time.monotonic()
-            schema_llm = llm.with_structured_output(SchemaResult)
-            schema: SchemaResult = await schema_llm.ainvoke(
-                SCHEMA_PROMPT.format(
-                    compilation_text=compilation_text,
-                    language=language,
-                )
+            schema_prompt_text = SCHEMA_PROMPT.format(
+                compilation_text=compilation_text,
+                language=language,
             )
+            schema_llm = llm.with_structured_output(SchemaResult)
+            schema: SchemaResult = await schema_llm.ainvoke(schema_prompt_text)
             analysis = schema.model_dump()
+            elapsed = (time.monotonic() - start) * 1000
             set_span_attributes(
                 span,
                 {
                     "export.categories_count": len(analysis["categories"]),
-                    "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    "duration_ms": round(elapsed, 2),
                 },
             )
             mark_span_success(span)
+
+            # PostHog LLM Analytics
+            capture_generation(
+                user_id or "system",
+                posthog_trace_id,
+                input_messages=schema_prompt_text[:3000],
+                output=str(analysis.get("overview", ""))[:2000],
+                model="gemini-2.5-flash",
+                latency_ms=elapsed,
+                properties={"step": "analyze_schemas"},
+            )
 
         update_notion_export_step(
             job_id,

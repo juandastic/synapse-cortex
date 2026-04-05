@@ -12,7 +12,6 @@ import uuid
 from collections.abc import AsyncGenerator
 
 import httpx
-from google import genai
 from google.genai import types
 from opentelemetry import trace
 
@@ -39,18 +38,22 @@ logger = logging.getLogger(__name__)
 class GenerationService:
     """Service for generating chat completions using Google Gemini."""
 
-    def __init__(self, client: genai.Client):
+    def __init__(self, client):
         self._client = client
+        # Detect if the client is a PostHog-wrapped AsyncClient
+        self._is_posthog_client = hasattr(client, "models") and hasattr(
+            client.models, "_ph_client"
+        )
 
     async def stream_chat_completion(
         self, request: ChatCompletionRequest
     ) -> AsyncGenerator[str, None]:
         """
         Stream chat completion in OpenAI-compatible SSE format.
-        
+
         Args:
             request: The chat completion request.
-        
+
         Yields:
             SSE-formatted strings: "data: {json}\n\n"
         """
@@ -103,11 +106,11 @@ class GenerationService:
                 # Track usage_metadata across chunks (fully populated on last chunk)
                 usage_metadata = None
 
-                # Use async client for true async streaming
+                # Use async streaming — route through PostHog wrapper or raw client
                 span.add_event("request_upstream")
-                async for chunk in await self._client.aio.models.generate_content_stream(
-                    model=request.model,
-                    contents=gemini_contents,
+                async for chunk in await self._stream_gemini(
+                    request.model, gemini_contents, request.user_id,
+                    trace_id=request.posthog_trace_id,
                 ):
                     set_span_attributes(span, {"chat.phase": "stream_chunks"})
                     if first_chunk_latency_ms is None:
@@ -273,6 +276,20 @@ class GenerationService:
                 }
                 yield f"data: {json.dumps(error_payload)}\n\n"
                 yield "data: [DONE]\n\n"
+
+    async def _stream_gemini(self, model: str, contents: list, user_id: str | None, trace_id: str = ""):
+        """Route streaming through PostHog wrapper (auto-tracked) or raw client."""
+        if self._is_posthog_client:
+            return await self._client.models.generate_content_stream(
+                model=model,
+                contents=contents,
+                posthog_distinct_id=user_id or "anonymous",
+                posthog_trace_id=trace_id,
+            )
+        return await self._client.aio.models.generate_content_stream(
+            model=model,
+            contents=contents,
+        )
 
     async def _download_image(self, url: str) -> tuple[bytes, str]:
         """

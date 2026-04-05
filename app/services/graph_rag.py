@@ -24,6 +24,7 @@ from graphiti_core.search.search_config_recipes import (
     NODE_HYBRID_SEARCH_RRF,
 )
 
+from app.core.posthog import capture_span, new_trace_id, posthog_user_context
 from app.schemas.models import ChatCompletionRequest, ChatMessage
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,7 @@ async def retrieve_graph_rag_context(
     user_id: str,
     included_edge_ids: set[str],
     included_node_ids: set[str],
+    posthog_trace_id: str = "",
 ) -> GraphRagResult:
     """Run the full GraphRAG pipeline: query -> search -> dedup -> format.
 
@@ -225,11 +227,12 @@ async def retrieve_graph_rag_context(
     query = build_search_query(messages)
 
     start_search = time.monotonic()
-    results = await graphiti.search_(
-        query,
-        config=EDGE_AND_NODE_HYBRID_SEARCH_RRF,
-        group_ids=[user_id],
-    )
+    with posthog_user_context(user_id, posthog_trace_id):
+        results = await graphiti.search_(
+            query,
+            config=EDGE_AND_NODE_HYBRID_SEARCH_RRF,
+            group_ids=[user_id],
+        )
     search_ms = (time.monotonic() - start_search) * 1000
 
     new_edges = deduplicate_edges(results.edges, included_edge_ids)
@@ -254,6 +257,25 @@ async def retrieve_graph_rag_context(
         logger.debug("GraphRAG edges: %s", [(e.uuid, e.fact) for e in new_edges])
     if new_nodes:
         logger.debug("GraphRAG nodes: %s", [(n.uuid, n.name) for n in new_nodes])
+
+    # PostHog LLM Analytics — uses same trace_id as the chat completion
+    capture_span(
+        user_id,
+        posthog_trace_id or new_trace_id(),
+        name="graphiti.search",
+        input_data=[{"role": "user", "content": query[:2000]}],
+        output_data=[{"role": "assistant", "content": context_block[:3000] or "(no relevant context found)"}],
+        duration_ms=total_ms,
+        properties={
+            "pipeline": "graph_rag",
+            "raw_edges": len(results.edges),
+            "raw_nodes": len(results.nodes),
+            "deduped_edges": deduped_edges,
+            "deduped_nodes": deduped_nodes,
+            "injected_edges": len(new_edges),
+            "injected_nodes": len(new_nodes),
+        },
+    )
 
     return GraphRagResult(
         context_block=context_block,
@@ -316,6 +338,7 @@ async def maybe_run_graph_rag(
             user_id=request.user_id,
             included_edge_ids=set(request.compilationMetadata.included_edge_ids),
             included_node_ids=set(request.compilationMetadata.included_node_ids),
+            posthog_trace_id=request.posthog_trace_id,
         )
         if rag_result.has_context:
             request.messages = build_messages_with_context(

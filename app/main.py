@@ -16,7 +16,8 @@ from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerCli
 from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
-from app.core.config import create_genai_client, get_settings
+from app.core.config import create_genai_client, create_posthog_genai_client, get_settings
+from app.core.posthog import get_posthog, init_posthog, set_posthog_genai_client, shutdown_posthog
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
@@ -44,6 +45,9 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info("Starting Synapse Cortex...")
 
+    # Initialize PostHog LLM Analytics (optional)
+    init_posthog(settings)
+
     # Initialize Neo4j async driver
     neo4j_driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
@@ -58,25 +62,44 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to connect to Neo4j: {e}")
         raise
 
-    # Create shared google-genai client (Vertex AI or AI Studio based on env vars)
-    genai_client = create_genai_client(settings)
+    # Create GenAI clients.
+    # If PostHog is configured, use its wrapper for auto-tracking LLM calls;
+    # extract the underlying raw client for Graphiti (which needs genai.Client).
+    # If PostHog is not configured, fall back to a plain genai.Client.
+    posthog_client = get_posthog()
+    if posthog_client:
+        posthog_genai_client, raw_genai_client = create_posthog_genai_client(
+            settings, posthog_client,
+        )
+        # Use the PostHog-wrapped client everywhere — it has .aio.models shim
+        # so Graphiti's internal calls (client.aio.models.generate_content)
+        # are automatically tracked in PostHog.
+        graphiti_client = posthog_genai_client
+        generation_client = posthog_genai_client
+        set_posthog_genai_client(posthog_genai_client)
+        logger.info("Using PostHog-wrapped GenAI client for LLM analytics")
+    else:
+        raw_genai_client = create_genai_client(settings)
+        graphiti_client = raw_genai_client
+        generation_client = raw_genai_client
 
-    # Initialize Graphiti with Gemini clients
+    # Initialize Graphiti — uses PostHog-wrapped client when available,
+    # so all internal LLM calls (entity extraction, reranking, etc.) are tracked.
     graphiti = Graphiti(
         settings.neo4j_uri,
         settings.neo4j_user,
         settings.neo4j_password,
         llm_client=GeminiClient(
             config=LLMConfig(model=settings.graphiti_model),
-            client=genai_client,
+            client=graphiti_client,
         ),
         embedder=GeminiEmbedder(
             config=GeminiEmbedderConfig(embedding_model="gemini-embedding-001"),
-            client=genai_client,
+            client=raw_genai_client,
         ),
         cross_encoder=GeminiRerankerClient(
             config=LLMConfig(model=settings.graphiti_model),
-            client=genai_client,
+            client=graphiti_client,
         ),
         max_coroutines=settings.semaphore_limit,
     )
@@ -89,7 +112,7 @@ async def lifespan(app: FastAPI):
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
     ingestion_service = IngestionService(graphiti, settings.graphiti_model)
-    generation_service = GenerationService(genai_client)
+    generation_service = GenerationService(generation_client)
     graph_service = GraphService(neo4j_driver, graphiti)
     notion_export_service = NotionExportService(
         hydration_service=hydration_service,
@@ -118,6 +141,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Synapse Cortex...")
     await neo4j_driver.close()
     await graphiti.close()
+    shutdown_posthog()
     shutdown_telemetry()
     logger.info("Synapse Cortex shutdown complete")
 

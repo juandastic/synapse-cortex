@@ -17,6 +17,7 @@ from graphiti_core.nodes import EpisodeType
 from opentelemetry import trace
 
 from app.core.observability import classify_error, mark_span_error, mark_span_success, set_span_attributes
+from app.core.posthog import capture_span, capture_trace, new_trace_id, posthog_user_context
 from app.schemas.models import (
     IngestAcceptedResponse,
     IngestMessage,
@@ -79,6 +80,7 @@ class IngestionService:
         Does NOT run hydration (that happens on GET when status is "completed").
         """
         tracer = trace.get_tracer(__name__)
+        posthog_trace_id = new_trace_id()
         with tracer.start_as_current_span(
             "ingest.process_background",
             attributes={
@@ -88,23 +90,24 @@ class IngestionService:
             },
         ) as span:
             start = time.monotonic()
+            episode_content = self._format_messages_for_graphiti(request.messages)
             try:
-                episode_content = self._format_messages_for_graphiti(request.messages)
                 episode_name = f"session_{request.sessionId}"
 
                 logger.info(f"Adding episode {episode_name} for user {request.userId}")
 
                 start_time = time.monotonic()
-                result = await self.graphiti.add_episode(
-                    name=episode_name,
-                    episode_body=episode_content,
-                    source=EpisodeType.message,
-                    source_description="Chat conversation from Synapse AI Chat application",
-                    group_id=request.userId,
-                    reference_time=datetime.fromtimestamp(
-                        request.metadata.sessionEndedAt / 1000
-                    ),
-                )
+                with posthog_user_context(request.userId, posthog_trace_id):
+                    result = await self.graphiti.add_episode(
+                        name=episode_name,
+                        episode_body=episode_content,
+                        source=EpisodeType.message,
+                        source_description="Chat conversation from Synapse AI Chat application",
+                        group_id=request.userId,
+                        reference_time=datetime.fromtimestamp(
+                            request.metadata.sessionEndedAt / 1000
+                        ),
+                    )
                 elapsed_ms = (time.monotonic() - start_time) * 1000
 
                 # Update job store with completion metadata (no hydration here)
@@ -136,6 +139,22 @@ class IngestionService:
                 )
                 mark_span_success(span)
 
+                # PostHog LLM Analytics
+                capture_trace(
+                    request.userId,
+                    posthog_trace_id,
+                    name="ingestion",
+                    properties={"pipeline": "ingestion", "session_id": request.sessionId},
+                )
+                capture_span(
+                    request.userId,
+                    posthog_trace_id,
+                    name="graphiti.add_episode",
+                    input_data=episode_content[:2000],
+                    output_data=f"{len(result.nodes)} nodes, {len(result.edges)} edges",
+                    duration_ms=elapsed_ms,
+                )
+
             except Exception as e:
                 category, code = classify_error(e)
                 mark_span_error(
@@ -153,6 +172,22 @@ class IngestionService:
                     exc_info=True,
                 )
                 fail_job(job_id, error=str(e), code="GRAPH_PROCESSING_ERROR")
+
+                # PostHog LLM Analytics (error)
+                capture_trace(
+                    request.userId,
+                    posthog_trace_id,
+                    name="ingestion",
+                    properties={"pipeline": "ingestion", "session_id": request.sessionId},
+                )
+                capture_span(
+                    request.userId,
+                    posthog_trace_id,
+                    name="graphiti.add_episode",
+                    input_data=episode_content[:2000],
+                    duration_ms=(time.monotonic() - start) * 1000,
+                    properties={"$ai_is_error": True, "$ai_error": str(e)[:500]},
+                )
 
     def _should_ingest(self, messages: list[IngestMessage]) -> bool:
         """Check if the session meets minimum requirements for ingestion."""
