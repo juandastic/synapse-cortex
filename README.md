@@ -8,9 +8,11 @@
 
 This project was built in public and documented through a series of articles that cover the motivation, architecture decisions, and evolution of the system:
 
-1. **[Beyond RAG: Building an AI Companion with Deep Memory Using Knowledge Graphs](https://dev.to/juandastic/beyond-rag-building-an-ai-companion-with-deep-memory-using-knowledge-graphs-2e6e)** — The origin story: why traditional RAG wasn't enough and how knowledge graphs became the foundation for long-term AI memory.
-2. **[Scaling AI Memory: How I Tamed a 120K Token Prompt with Deterministic GraphRAG](https://dev.to/juandastic/scaling-ai-memory-how-i-tamed-a-120k-token-prompt-with-deterministic-graphrag-4f85)** — The scaling challenge: how the system evolved to handle growing knowledge graphs without blowing up context windows.
-3. **[Full Circle: Giving My AI's Knowledge Graph a Notion Interface Using MCP](https://dev.to/juandastic/full-circle-giving-my-ais-knowledge-graph-a-notion-interface-using-mcp-2dmp)** — Closing the loop: connecting the knowledge graph to Notion via MCP for a human-friendly interface to the AI's memory.
+
+1. **[My Wife Sent 297 Messages in 15 Days. Not to Me. To the AI I Built Her. The Synapse Story](https://dev.to/juandastic/my-wife-sent-297-messages-in-15-days-not-to-me-to-the-ai-i-built-her-the-synapse-story-333o)** - The origin story, motivation, and how it looks today
+2. **[Beyond RAG: Building an AI Companion with Deep Memory Using Knowledge Graphs](https://dev.to/juandastic/beyond-rag-building-an-ai-companion-with-deep-memory-using-knowledge-graphs-2e6e)** — The first version: why traditional RAG wasn't enough and how knowledge graphs became the foundation for long-term AI memory.
+3. **[Scaling AI Memory: How I Tamed a 120K Token Prompt with Deterministic GraphRAG](https://dev.to/juandastic/scaling-ai-memory-how-i-tamed-a-120k-token-prompt-with-deterministic-graphrag-4f85)** — The scaling challenge: how the system evolved to handle growing knowledge graphs without blowing up context windows.
+4. **[Full Circle: Giving My AI's Knowledge Graph a Notion Interface Using MCP](https://dev.to/juandastic/full-circle-giving-my-ais-knowledge-graph-a-notion-interface-using-mcp-2dmp)** — Closing the loop: connecting the knowledge graph to Notion via MCP for a human-friendly interface to the AI's memory.
 
 If you want to understand the *why* behind the architecture and design choices in this repo, start with those articles.
 
