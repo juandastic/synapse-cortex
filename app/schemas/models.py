@@ -72,6 +72,14 @@ class IngestAcceptedResponse(BaseModel):
     compilationMetadata: CompilationMetadataResponse | None = None
 
 
+class GraphStatsResponse(BaseModel):
+    """Total graph statistics for the user's knowledge graph."""
+
+    entity_count: int = Field(..., description="Total Entity nodes in the graph")
+    relationship_count: int = Field(..., description="Total valid RELATES_TO edges")
+    total_chars: int = Field(default=0, description="Sum of all entity summaries + relationship facts in chars")
+
+
 class IngestStatusResponse(BaseModel):
     """Response for GET /ingest/status/{job_id}."""
 
@@ -79,6 +87,7 @@ class IngestStatusResponse(BaseModel):
     status: Literal["processing", "completed", "failed"]
     userKnowledgeCompilation: str | None = None
     compilationMetadata: CompilationMetadataResponse | None = None
+    graphStats: GraphStatsResponse | None = None
     metadata: IngestResponseMetadata | None = None
     error: str | None = None
     code: str | None = None
@@ -194,6 +203,7 @@ class HydrateResponse(BaseModel):
     success: bool
     userKnowledgeCompilation: str | None = None
     compilationMetadata: CompilationMetadataResponse | None = None
+    graphStats: GraphStatsResponse | None = None
     error: str | None = None
     code: str | None = None
 

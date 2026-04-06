@@ -38,6 +38,7 @@ from app.schemas.models import (
     GraphCorrectionRequest,
     GraphCorrectionResponse,
     GraphResponse,
+    GraphStatsResponse,
     HealthResponse,
     HydrateRequest,
     HydrateResponse,
@@ -55,7 +56,7 @@ from app.schemas.models import (
     NotionExportResult,
     NotionExportStatusResponse,
 )
-from app.services.hydration_result import CompilationMetadata
+from app.services.hydration_result import CompilationMetadata, GraphStats
 from app.services.graph_rag import (
     maybe_run_graph_rag,
     rag_outcome_to_span_attrs,
@@ -89,6 +90,18 @@ def _to_metadata_response(
         total_estimated_tokens=meta.total_estimated_tokens,
         included_node_ids=meta.included_node_ids,
         included_edge_ids=meta.included_edge_ids,
+    )
+
+
+def _to_graph_stats_response(
+    stats: GraphStats | None,
+) -> GraphStatsResponse | None:
+    if stats is None:
+        return None
+    return GraphStatsResponse(
+        entity_count=stats.entity_count,
+        relationship_count=stats.relationship_count,
+        total_chars=stats.total_chars,
     )
 
 
@@ -246,6 +259,7 @@ async def ingest_status(
             status="completed",
             userKnowledgeCompilation=result.compilation_text,
             compilationMetadata=_to_metadata_response(result.metadata),
+            graphStats=_to_graph_stats_response(result.graph_stats),
             metadata=ingest_metadata,
         )
 
@@ -306,6 +320,7 @@ async def hydrate_user(
             success=True,
             userKnowledgeCompilation=result.compilation_text,
             compilationMetadata=_to_metadata_response(result.metadata),
+            graphStats=_to_graph_stats_response(result.graph_stats),
         )
     except Exception as e:
         category, code = classify_error(e)

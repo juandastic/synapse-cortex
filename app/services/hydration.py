@@ -22,7 +22,7 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
-from app.services.hydration_result import HydrationResult
+from app.services.hydration_result import GraphStats, HydrationResult
 from app.services.hydration_v2 import HydrationV2Engine
 
 # Default minimum connections for entity inclusion (filters long-tail noise)
@@ -40,6 +40,22 @@ WITH n, count(r) AS degree
 WHERE degree >= $min_degree
 RETURN n.name AS name, n.summary AS summary, degree
 ORDER BY degree DESC
+"""
+
+# Cypher: Total graph counts + total content size (unfiltered, for memory stats & pricing)
+TOTAL_GRAPH_COUNTS_QUERY = """
+MATCH (n:Entity {group_id: $group_id})
+WHERE n.summary IS NOT NULL AND n.summary <> ""
+WITH count(n) AS entity_count,
+     sum(size(coalesce(n.summary, ""))) AS entity_chars
+OPTIONAL MATCH ()-[r:RELATES_TO {group_id: $group_id}]-()
+WHERE r.invalid_at IS NULL OR r.invalid_at > datetime()
+  AND NOT 'Episode' IN labels(startNode(r))
+  AND NOT 'Episode' IN labels(endNode(r))
+WITH entity_count, entity_chars,
+     count(DISTINCT r) AS relationship_count,
+     sum(size(coalesce(r.fact, ""))) AS rel_chars
+RETURN entity_count, relationship_count, entity_chars + rel_chars AS total_chars
 """
 
 # Cypher: Fetch relationships with temporal context
@@ -77,11 +93,18 @@ class HydrationService:
         user_id: str,
         version: Literal["v1", "v2"] = "v1",
     ) -> HydrationResult:
+        # Fetch total graph counts in parallel with compilation
+        graph_stats = await self._fetch_graph_stats(user_id)
+
         if version == "v2":
             engine = HydrationV2Engine(self.driver, self.min_degree)
-            return await engine.build(user_id)
+            result = await engine.build(user_id)
+            result.graph_stats = graph_stats
+            return result
 
-        return await self._build_v1(user_id)
+        result = await self._build_v1(user_id)
+        result.graph_stats = graph_stats
+        return result
 
     async def _build_v1(self, user_id: str) -> HydrationResult:
         tracer = trace.get_tracer(__name__)
@@ -241,6 +264,32 @@ class HydrationService:
             )
             mark_span_success(span)
             return lines
+
+    async def _fetch_graph_stats(self, group_id: str) -> GraphStats:
+        """
+        Fetch total entity and relationship counts for the user's graph.
+
+        These are unfiltered totals (no min_degree filter) for the Memory Pulse UI.
+        Uses a cheap indexed COUNT query.
+        """
+        try:
+            async with self.driver.session() as session:
+                result = await session.run(
+                    TOTAL_GRAPH_COUNTS_QUERY,
+                    group_id=group_id,
+                )
+                record = await result.single()
+
+            if record:
+                return GraphStats(
+                    entity_count=record["entity_count"] or 0,
+                    relationship_count=record["relationship_count"] or 0,
+                    total_chars=record["total_chars"] or 0,
+                )
+            return GraphStats(entity_count=0, relationship_count=0, total_chars=0)
+        except Exception:
+            # Graceful degradation — stats are non-critical
+            return GraphStats(entity_count=0, relationship_count=0, total_chars=0)
 
     @staticmethod
     def _format_relation_name(name: str | None) -> str:

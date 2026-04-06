@@ -10,6 +10,16 @@ class CompilationMetadata:
 
 
 @dataclass
+class GraphStats:
+    """Total graph-wide counts + content size (unfiltered by compilation budget)."""
+
+    entity_count: int
+    relationship_count: int
+    total_chars: int = 0
+
+
+@dataclass
 class HydrationResult:
     compilation_text: str
     metadata: CompilationMetadata | None = None
+    graph_stats: GraphStats | None = None
