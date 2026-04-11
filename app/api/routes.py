@@ -388,6 +388,7 @@ async def chat_completions(
         request.user_id or "anonymous",
         request.posthog_trace_id,
         name="chat_completion",
+        session_id=request.session_id,
     )
 
     # --- GraphRAG Context Retrieval ---

@@ -114,7 +114,7 @@ class IngestionService:
                 logger.info(f"Adding episode {episode_name} for user {request.userId}")
 
                 start_time = time.monotonic()
-                with posthog_user_context(request.userId, posthog_trace_id):
+                with posthog_user_context(request.userId, posthog_trace_id, request.sessionId):
                     result = await self.graphiti.add_episode(
                         name=episode_name,
                         episode_body=episode_content,
@@ -163,7 +163,8 @@ class IngestionService:
                     request.userId,
                     posthog_trace_id,
                     name="ingestion",
-                    properties={"pipeline": "ingestion", "session_id": request.sessionId},
+                    session_id=request.sessionId,
+                    properties={"pipeline": "ingestion"},
                 )
                 capture_span(
                     request.userId,
@@ -205,7 +206,8 @@ class IngestionService:
                     request.userId,
                     posthog_trace_id,
                     name="ingestion",
-                    properties={"pipeline": "ingestion", "session_id": request.sessionId},
+                    session_id=request.sessionId,
+                    properties={"pipeline": "ingestion"},
                 )
                 capture_span(
                     request.userId,

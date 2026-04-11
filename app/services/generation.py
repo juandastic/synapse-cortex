@@ -111,6 +111,7 @@ class GenerationService:
                 async for chunk in await self._stream_gemini(
                     request.model, gemini_contents, request.user_id,
                     trace_id=request.posthog_trace_id,
+                    session_id=request.session_id,
                 ):
                     set_span_attributes(span, {"chat.phase": "stream_chunks"})
                     if first_chunk_latency_ms is None:
@@ -277,14 +278,21 @@ class GenerationService:
                 yield f"data: {json.dumps(error_payload)}\n\n"
                 yield "data: [DONE]\n\n"
 
-    async def _stream_gemini(self, model: str, contents: list, user_id: str | None, trace_id: str = ""):
+    async def _stream_gemini(
+        self, model: str, contents: list, user_id: str | None,
+        trace_id: str = "", session_id: str | None = None,
+    ):
         """Route streaming through PostHog wrapper (auto-tracked) or raw client."""
         if self._is_posthog_client:
+            posthog_props: dict[str, str] = {}
+            if session_id:
+                posthog_props["$ai_session_id"] = session_id
             return await self._client.models.generate_content_stream(
                 model=model,
                 contents=contents,
                 posthog_distinct_id=user_id or "anonymous",
                 posthog_trace_id=trace_id,
+                **({"posthog_properties": posthog_props} if posthog_props else {}),
             )
         return await self._client.aio.models.generate_content_stream(
             model=model,

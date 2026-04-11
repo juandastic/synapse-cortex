@@ -141,6 +141,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = Field(default=True, description="Whether to stream the response")
     compilationMetadata: CompilationMetadataResponse | None = None
     user_id: str | None = Field(default=None, description="User/group ID for GraphRAG context retrieval")
+    session_id: str | None = Field(default=None, description="Convex session ID for PostHog $ai_session_id grouping")
     rag_usage_fields: dict[str, object] = Field(default_factory=dict, exclude=True)
     posthog_trace_id: str = Field(default="", exclude=True)
 

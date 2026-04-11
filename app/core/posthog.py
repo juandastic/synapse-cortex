@@ -84,6 +84,7 @@ def capture_generation(
     output_tokens: int | None = None,
     latency_ms: float | None = None,
     error: str | None = None,
+    session_id: str | None = None,
     properties: dict[str, Any] | None = None,
 ) -> None:
     """Capture an $ai_generation event for a single LLM call."""
@@ -93,6 +94,8 @@ def capture_generation(
         "$ai_trace_id": trace_id,
         "$ai_provider": provider,
     }
+    if session_id:
+        props["$ai_session_id"] = session_id
     if model:
         props["$ai_model"] = model
     if input_messages is not None:
@@ -160,13 +163,13 @@ def set_posthog_genai_client(client) -> None:
 
 
 @contextmanager
-def posthog_user_context(distinct_id: str, trace_id: str | None = None):
-    """Temporarily set the default distinct_id (and optionally trace_id) on the
+def posthog_user_context(distinct_id: str, trace_id: str | None = None, session_id: str | None = None):
+    """Temporarily set the default distinct_id (and optionally trace_id/session_id) on the
     PostHog GenAI wrapper so that all LLM calls made within the block
-    (including Graphiti's internal calls) are associated with the correct user.
+    (including Graphiti's internal calls) are associated with the correct user and session.
 
     Usage:
-        with posthog_user_context(user_id, trace_id):
+        with posthog_user_context(user_id, trace_id, session_id):
             await graphiti.add_episode(...)
     """
     client = _posthog_genai_client
@@ -179,8 +182,13 @@ def posthog_user_context(distinct_id: str, trace_id: str | None = None):
     prev_properties = getattr(models, "_default_properties", {})
 
     models._default_distinct_id = distinct_id
+    extra_props: dict[str, str] = {}
     if trace_id:
-        models._default_properties = {**prev_properties, "$ai_trace_id": trace_id}
+        extra_props["$ai_trace_id"] = trace_id
+    if session_id:
+        extra_props["$ai_session_id"] = session_id
+    if extra_props:
+        models._default_properties = {**prev_properties, **extra_props}
     try:
         yield
     finally:
