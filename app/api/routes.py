@@ -90,6 +90,7 @@ def _to_metadata_response(
         total_estimated_tokens=meta.total_estimated_tokens,
         included_node_ids=meta.included_node_ids,
         included_edge_ids=meta.included_edge_ids,
+        included_episode_ids=meta.included_episode_ids,
     )
 
 

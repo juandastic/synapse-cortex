@@ -61,6 +61,7 @@ class CompilationMetadataResponse(BaseModel):
     total_estimated_tokens: int
     included_node_ids: list[str]
     included_edge_ids: list[str]
+    included_episode_ids: list[str] = Field(default_factory=list)
 
 
 class IngestAcceptedResponse(BaseModel):

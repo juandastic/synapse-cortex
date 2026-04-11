@@ -111,7 +111,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
-    ingestion_service = IngestionService(graphiti, settings.graphiti_model)
+    ingestion_service = IngestionService(graphiti, settings.graphiti_model, generation_client)
     generation_service = GenerationService(generation_client)
     graph_service = GraphService(neo4j_driver, graphiti)
     notion_export_service = NotionExportService(

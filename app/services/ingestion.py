@@ -12,6 +12,7 @@ import logging
 import time
 from datetime import datetime
 
+from google.genai import types
 from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
 from opentelemetry import trace
@@ -22,8 +23,6 @@ from app.schemas.models import (
     IngestAcceptedResponse,
     IngestMessage,
     IngestRequest,
-    IngestResponse,
-    IngestResponseMetadata,
 )
 from app.services.job_store import complete_job, create_job, fail_job, get_job
 
@@ -33,13 +32,31 @@ logger = logging.getLogger(__name__)
 MIN_MESSAGES = 1
 MIN_TOTAL_CHARS = 5
 
+# Assistant messages beyond this limit are truncated before sending to Graphiti.
+# User messages carry the signal (personal details, decisions, experiences);
+# assistant responses are verbose and add noise to entity extraction.
+ASSISTANT_TRUNCATE_LIMIT = 300
+
+# Model used for episode summarization (fast/cheap, one-time cost per ingestion)
+SUMMARY_MODEL = "gemini-2.5-flash-lite"
+
+SUMMARY_PROMPT = (
+    "Summarize this conversation in 2-3 sentences in the same language as the conversation. "
+    "Focus on: key topics discussed, decisions made, and any important insights. "
+    "Be factual and concise. Output ONLY the summary, no preamble or labels.\n\n"
+)
+
+# Cap input to the summarization call to control cost
+SUMMARY_INPUT_LIMIT = 8000
+
 
 class IngestionService:
     """Service for processing chat sessions into the knowledge graph."""
 
-    def __init__(self, graphiti: Graphiti, model: str):
+    def __init__(self, graphiti: Graphiti, model: str, genai_client=None):
         self.graphiti = graphiti
         self.model = model
+        self._genai_client = genai_client
 
     async def accept_session(self, request: IngestRequest) -> IngestAcceptedResponse:
         """
@@ -110,7 +127,9 @@ class IngestionService:
                     )
                 elapsed_ms = (time.monotonic() - start_time) * 1000
 
-                # Update job store with completion metadata (no hydration here)
+                # Update job store with completion metadata (no hydration here).
+                # Done BEFORE summarization so the client gets "completed" without
+                # waiting for the summary LLM call.
                 complete_job(
                     job_id,
                     model=self.model,
@@ -155,6 +174,14 @@ class IngestionService:
                     duration_ms=elapsed_ms,
                 )
 
+                # Summarize the episode and store on the Neo4j node.
+                # Runs AFTER complete_job so the client isn't blocked.
+                if result.episode:
+                    summary = await self._summarize_episode(episode_content)
+                    if summary:
+                        await self._store_episode_summary(result.episode.uuid, summary)
+                        logger.info(f"Stored episode summary ({len(summary)} chars)")
+
             except Exception as e:
                 category, code = classify_error(e)
                 mark_span_error(
@@ -189,6 +216,43 @@ class IngestionService:
                     properties={"$ai_is_error": True, "$ai_error": str(e)[:500]},
                 )
 
+    async def _summarize_episode(self, episode_content: str) -> str | None:
+        """Generate a concise summary from the already-formatted episode text.
+
+        Reuses the output of _format_messages_for_graphiti (which already has
+        truncated assistant messages), capped at SUMMARY_INPUT_LIMIT chars.
+        Returns None on failure.
+        """
+        if self._genai_client is None:
+            return None
+
+        text = episode_content[:SUMMARY_INPUT_LIMIT]
+        try:
+            response = await self._genai_client.aio.models.generate_content(
+                model=SUMMARY_MODEL,
+                contents=[types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=SUMMARY_PROMPT + text)],
+                )],
+            )
+            # response.text is None when the model returns no content (e.g. safety filter)
+            return response.text.strip() if response.text else None
+        except Exception as e:
+            logger.warning(f"Episode summarization failed: {e}")
+            return None
+
+    async def _store_episode_summary(self, episode_uuid: str, summary: str) -> None:
+        """Write the summary as a custom property on the Episodic node in Neo4j."""
+        try:
+            async with self.graphiti.driver.session() as session:
+                await session.run(
+                    "MATCH (e:Episodic {uuid: $uuid}) SET e.summary = $summary",
+                    uuid=episode_uuid,
+                    summary=summary,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to store episode summary: {e}")
+
     def _should_ingest(self, messages: list[IngestMessage]) -> bool:
         """Check if the session meets minimum requirements for ingestion."""
         if len(messages) < MIN_MESSAGES:
@@ -201,10 +265,19 @@ class IngestionService:
         return True
 
     def _format_messages_for_graphiti(self, messages: list[IngestMessage]) -> str:
-        """Format messages into a single episode body for Graphiti."""
+        """Format messages into a single episode body for Graphiti.
+
+        Assistant messages are truncated to reduce noise — user messages
+        carry the valuable memory signal (personal details, decisions, experiences).
+        """
         formatted_lines = []
         for msg in messages:
-            role_label = "User" if msg.role == "user" else "Assistant"
-            formatted_lines.append(f"{role_label}: {msg.content}")
+            if msg.role == "user":
+                formatted_lines.append(f"User: {msg.content}")
+            else:
+                content = msg.content
+                if len(content) > ASSISTANT_TRUNCATE_LIMIT:
+                    content = content[:ASSISTANT_TRUNCATE_LIMIT] + "..."
+                formatted_lines.append(f"Assistant: {content}")
 
         return "\n\n".join(formatted_lines)

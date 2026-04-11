@@ -1,12 +1,21 @@
 """
 Hydration V2 Engine - Budget-aware compilation with cascading waterfill allocation.
 
-Maximizes context within a character limit using priority-based edge selection
-and in-memory hub classification from node degree data.
+Maximizes context within a character limit using priority-based edge selection,
+in-memory hub classification from node degree data, and episodic memory retrieval.
+
+Compilation is organized into four sections:
+  1. SESSION HISTORY — chronological episode summaries
+  2. ACTIVE CONTEXT — recently updated facts and relationships
+  3. CORE IDENTITY & DEFINITIONS — stable entities and hub relationships
+  4. BEHAVIORAL PATTERNS & DYNAMICS — long-tail behavioral edges
 """
 
+import asyncio
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from neo4j import AsyncDriver
 from opentelemetry import trace
@@ -21,11 +30,23 @@ from app.core.observability import (
 from app.services.hydration_result import CompilationMetadata, HydrationResult
 
 DEFAULT_CHAR_LIMIT = 120_000
-NODE_BUDGET_RATIO = 0.40
-# Nodes rarely consume their full 40%; leftover rolls into the edge budget
-EDGE_BUDGET_RATIO = 0.60
+
+# 4-tier budget allocation (rollover cascades: episode -> active -> identity -> dynamics)
+EPISODE_BUDGET_RATIO = 0.08   # ~9.6K chars (episodes are small, ~3K typical)
+ACTIVE_BUDGET_RATIO = 0.12    # ~14.4K chars (recent context, changes frequently)
+IDENTITY_BUDGET_RATIO = 0.45  # ~54K chars (nodes + stable hub edges — the bulk)
+DYNAMICS_BUDGET_RATIO = 0.35  # ~42K chars (long-tail behavioral edges)
+
 # Entities in the top 30% by degree are considered structural hubs
 HUB_PERCENTILE = 0.70
+
+# Edges created within this window are considered "recent" (Active Context section)
+RECENCY_WINDOW_DAYS = 14
+
+# Fallback: max chars of user messages to extract when no summary exists
+EPISODE_CONTENT_FALLBACK_LIMIT = 200
+
+_USER_PREFIX = "User: "
 
 FETCH_NODES_QUERY = """
 MATCH (n:Entity)-[r:RELATES_TO]-(other:Entity)
@@ -57,10 +78,47 @@ RETURN
 ORDER BY r.created_at DESC
 """
 
+FETCH_EPISODES_QUERY = """
+MATCH (e:Episodic)
+WHERE e.group_id = $group_id
+  AND e.source = 'message'
+RETURN e.uuid AS uuid,
+       e.name AS name,
+       e.valid_at AS valid_at,
+       e.summary AS summary,
+       e.content AS content
+ORDER BY e.valid_at DESC
+LIMIT $limit
+"""
+
 
 def _compact_date(value: object) -> str:
     """Extract YYYY-MM-DD from Neo4j DateTime or ISO string."""
     return str(value)[:10]
+
+
+def _extract_user_lines(content: str, limit: int) -> str:
+    """Extract user messages from raw episode content as a fallback summary.
+
+    Episode content is formatted as "User: ...\n\nAssistant: ..." blocks.
+    We only keep the user parts (the valuable signal) and join them with " | ".
+    """
+    parts: list[str] = []
+    total = 0
+    for block in content.split("\n\n"):
+        block = block.strip()
+        if block.startswith(_USER_PREFIX):
+            text = block[len(_USER_PREFIX):].strip()
+            if not text:
+                continue
+            if total + len(text) > limit:
+                remaining = limit - total
+                if remaining > 20:
+                    parts.append(text[:remaining] + "...")
+                break
+            parts.append(text)
+            total += len(text)
+    return " | ".join(parts) if parts else content[:limit] + "..."
 
 
 @dataclass
@@ -83,6 +141,19 @@ class EdgeRecord:
     target_name: str
     formatted: str
     recency_key: object  # datetime used for sorting; opaque to avoid parsing
+
+    @property
+    def char_cost(self) -> int:
+        return len(self.formatted)
+
+
+@dataclass
+class EpisodeRecord:
+    uuids: list[str]  # all episode UUIDs merged into this day group
+    name: str
+    valid_at: object  # datetime
+    summary: str
+    formatted: str
 
     @property
     def char_cost(self) -> int:
@@ -113,13 +184,17 @@ class HydrationV2Engine:
         ) as span:
             start = time.monotonic()
             try:
-                nodes = await self._fetch_nodes(user_id)
+                # Fetch all three data sources in parallel
+                episodes, nodes, edges = await asyncio.gather(
+                    self._fetch_episodes(user_id),
+                    self._fetch_nodes(user_id),
+                    self._fetch_edges(user_id),
+                )
                 node_degree_map = {n.name: n.degree for n in nodes}
 
-                edges = await self._fetch_edges(user_id)
-
-                if not nodes and not edges:
+                if not nodes and not edges and not episodes:
                     set_span_attributes(span, {
+                        "hydrate.episodes_count": 0,
                         "hydrate.nodes_count": 0,
                         "hydrate.edges_count": 0,
                         "duration_ms": round((time.monotonic() - start) * 1000, 2),
@@ -128,16 +203,18 @@ class HydrationV2Engine:
                     return HydrationResult(compilation_text="")
 
                 total_chars = (
-                    sum(n.char_cost for n in nodes)
+                    sum(ep.char_cost for ep in episodes)
+                    + sum(n.char_cost for n in nodes)
                     + sum(e.char_cost for e in edges)
                 )
 
                 if total_chars <= self.char_limit:
-                    result = self._build_fast_path(nodes, edges, total_chars)
+                    result = self._build_fast_path(episodes, nodes, edges, total_chars)
                 else:
-                    result = self._build_with_budget(nodes, edges, node_degree_map)
+                    result = self._build_with_budget(episodes, nodes, edges, node_degree_map)
 
                 set_span_attributes(span, {
+                    "hydrate.episodes_count": len(episodes),
                     "hydrate.nodes_count": len(nodes),
                     "hydrate.edges_count": len(edges),
                     "hydrate.is_partial": result.metadata.is_partial if result.metadata else False,
@@ -213,17 +290,73 @@ class HydrationV2Engine:
 
         return edges
 
+    async def _fetch_episodes(self, group_id: str, limit: int = 15) -> list[EpisodeRecord]:
+        """Fetch recent episodes and group them by day.
+
+        Multiple sessions on the same date are merged into a single entry
+        so the timeline reads as one line per day, not one per session.
+        """
+        async with self.driver.session() as session:
+            result = await session.run(
+                FETCH_EPISODES_QUERY, group_id=group_id, limit=limit,
+            )
+            records = await result.data()
+
+        # Group raw episode summaries by date (YYYY-MM-DD)
+        days: OrderedDict[str, list[str]] = OrderedDict()
+        uuids_by_day: OrderedDict[str, list[str]] = OrderedDict()
+        first_valid_at: dict[str, object] = {}
+
+        for r in records:
+            summary = r.get("summary") or ""
+            if not summary and r.get("content"):
+                summary = _extract_user_lines(
+                    r["content"], EPISODE_CONTENT_FALLBACK_LIMIT,
+                )
+            if not summary:
+                continue
+            date_str = _compact_date(r["valid_at"]) if r.get("valid_at") else "unknown"
+            days.setdefault(date_str, []).append(summary)
+            uuids_by_day.setdefault(date_str, []).append(r["uuid"])
+            if date_str not in first_valid_at:
+                first_valid_at[date_str] = r.get("valid_at")
+
+        # Build one EpisodeRecord per day
+        episodes = []
+        for date_str, summaries in days.items():
+            merged = " | ".join(summaries)
+            formatted = f"- [{date_str}] {merged}"
+            episodes.append(EpisodeRecord(
+                uuids=uuids_by_day[date_str],
+                name=date_str,
+                valid_at=first_valid_at.get(date_str),
+                summary=merged,
+                formatted=formatted,
+            ))
+        return episodes
+
     # ── Fast Path (everything fits) ──────────────────────────────────────
 
     def _build_fast_path(
         self,
+        episodes: list[EpisodeRecord],
         nodes: list[NodeRecord],
         edges: list[EdgeRecord],
         total_chars: int,
     ) -> HydrationResult:
+        recent_edges, stable_edges = self._partition_edges_by_recency(edges)
+        node_degree_map = {n.name: n.degree for n in nodes}
+        hub_threshold = self._compute_hub_threshold(node_degree_map)
+        identity_edges, dynamics_edges = self._partition_stable_edges(
+            stable_edges, node_degree_map, hub_threshold,
+        )
+
         compilation = self._format_compilation(
-            [n.formatted for n in nodes],
-            [e.formatted for e in edges],
+            episode_lines=[ep.formatted for ep in episodes],
+            active_lines=[e.formatted for e in recent_edges],
+            node_lines=[n.formatted for n in nodes],
+            identity_edge_lines=[e.formatted for e in identity_edges],
+            dynamics_lines=[e.formatted for e in dynamics_edges],
         )
         return HydrationResult(
             compilation_text=compilation,
@@ -232,6 +365,7 @@ class HydrationV2Engine:
                 total_estimated_tokens=total_chars // 4,
                 included_node_ids=[n.uuid for n in nodes],
                 included_edge_ids=[e.uuid for e in edges],
+                included_episode_ids=[uid for ep in episodes for uid in ep.uuids],
             ),
         )
 
@@ -239,36 +373,82 @@ class HydrationV2Engine:
 
     def _build_with_budget(
         self,
+        episodes: list[EpisodeRecord],
         nodes: list[NodeRecord],
         edges: list[EdgeRecord],
         node_degree_map: dict[str, int],
     ) -> HydrationResult:
-        node_budget = int(self.char_limit * NODE_BUDGET_RATIO)
+        # Tier 1: Episodes
+        episode_budget = int(self.char_limit * EPISODE_BUDGET_RATIO)
+        included_episodes = self._select_within_budget(episodes, episode_budget)
+        ep_used = sum(ep.char_cost for ep in included_episodes)
+        rollover = episode_budget - ep_used
 
-        included_nodes = self._select_nodes_within_budget(nodes, node_budget)
-        used_node_chars = sum(n.char_cost for n in included_nodes)
-        rollover = node_budget - used_node_chars
+        # Tier 2: Active Context (recent edges)
+        recent_edges, stable_edges = self._partition_edges_by_recency(edges)
+        active_budget = int(self.char_limit * ACTIVE_BUDGET_RATIO) + rollover
+        included_active = self._select_within_budget(recent_edges, active_budget)
+        active_used = sum(e.char_cost for e in included_active)
+        rollover = active_budget - active_used
 
-        edge_budget = int(self.char_limit * EDGE_BUDGET_RATIO) + rollover
+        # Tier 3: Core Identity (nodes + stable hub edges)
+        identity_budget = int(self.char_limit * IDENTITY_BUDGET_RATIO) + rollover
+        # Nodes get first pick within the identity budget
+        included_nodes = self._select_nodes_within_budget(nodes, identity_budget)
+        nodes_used = sum(n.char_cost for n in included_nodes)
+        identity_edge_budget = identity_budget - nodes_used
+
         hub_threshold = self._compute_hub_threshold(node_degree_map)
-        included_edges = self._select_edges_within_budget(
-            edges, edge_budget, node_degree_map, hub_threshold,
+        identity_edges, dynamics_edges = self._partition_stable_edges(
+            stable_edges, node_degree_map, hub_threshold,
+        )
+        included_identity_edges = self._select_within_budget(
+            identity_edges, identity_edge_budget,
+        )
+        identity_edges_used = sum(e.char_cost for e in included_identity_edges)
+        rollover = identity_edge_budget - identity_edges_used
+
+        # Tier 4: Behavioral Patterns & Dynamics (long-tail edges)
+        dynamics_budget = int(self.char_limit * DYNAMICS_BUDGET_RATIO) + rollover
+        included_dynamics = self._select_within_budget(dynamics_edges, dynamics_budget)
+
+        total_chars = (
+            ep_used + active_used + nodes_used
+            + identity_edges_used
+            + sum(e.char_cost for e in included_dynamics)
         )
 
-        total_chars = used_node_chars + sum(e.char_cost for e in included_edges)
         compilation = self._format_compilation(
-            [n.formatted for n in included_nodes],
-            [e.formatted for e in included_edges],
+            episode_lines=[ep.formatted for ep in included_episodes],
+            active_lines=[e.formatted for e in included_active],
+            node_lines=[n.formatted for n in included_nodes],
+            identity_edge_lines=[e.formatted for e in included_identity_edges],
+            dynamics_lines=[e.formatted for e in included_dynamics],
         )
+
+        all_included_edges = included_active + included_identity_edges + included_dynamics
         return HydrationResult(
             compilation_text=compilation,
             metadata=CompilationMetadata(
                 is_partial=True,
                 total_estimated_tokens=total_chars // 4,
                 included_node_ids=[n.uuid for n in included_nodes],
-                included_edge_ids=[e.uuid for e in included_edges],
+                included_edge_ids=[e.uuid for e in all_included_edges],
+                included_episode_ids=[uid for ep in included_episodes for uid in ep.uuids],
             ),
         )
+
+    @staticmethod
+    def _select_within_budget(items: list, budget: int) -> list:
+        """Generic greedy selector: pick items in order until budget runs out."""
+        selected = []
+        remaining = budget
+        for item in items:
+            if item.char_cost > remaining:
+                continue
+            selected.append(item)
+            remaining -= item.char_cost
+        return selected
 
     @staticmethod
     def _select_nodes_within_budget(
@@ -293,67 +473,97 @@ class HydrationV2Engine:
         return degrees[min(cutoff_index, len(degrees) - 1)]
 
     @staticmethod
-    def _select_edges_within_budget(
+    def _partition_edges_by_recency(
         edges: list[EdgeRecord],
-        budget: int,
+    ) -> tuple[list[EdgeRecord], list[EdgeRecord]]:
+        """Split edges into recent (Active Context) and stable (older) groups."""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=RECENCY_WINDOW_DAYS)
+        recent: list[EdgeRecord] = []
+        stable: list[EdgeRecord] = []
+        for edge in edges:
+            try:
+                key = edge.recency_key
+                # Neo4j DateTime objects have .to_native() or can be compared as strings
+                if key and str(key)[:10] >= cutoff.strftime("%Y-%m-%d"):
+                    recent.append(edge)
+                else:
+                    stable.append(edge)
+            except (TypeError, ValueError):
+                stable.append(edge)
+        return recent, stable
+
+    @staticmethod
+    def _partition_stable_edges(
+        stable_edges: list[EdgeRecord],
         node_degree_map: dict[str, int],
         hub_threshold: int,
-    ) -> list[EdgeRecord]:
+    ) -> tuple[list[EdgeRecord], list[EdgeRecord]]:
+        """Split stable edges into identity (hub-connected) and dynamics (long-tail).
+
+        Identity edges: at least one endpoint is a hub (core relationships).
+        Dynamics edges: neither endpoint is a hub (behavioral patterns, long-tail).
+        """
         def is_hub(name: str) -> bool:
             return node_degree_map.get(name, 0) >= hub_threshold
 
-        hub_to_hub: list[EdgeRecord] = []
-        hub_adjacent: list[EdgeRecord] = []
-        long_tail: list[EdgeRecord] = []
+        identity: list[EdgeRecord] = []
+        dynamics: list[EdgeRecord] = []
 
-        for edge in edges:
-            source_is_hub = is_hub(edge.source_name)
-            target_is_hub = is_hub(edge.target_name)
-
-            if source_is_hub and target_is_hub:
-                hub_to_hub.append(edge)
-            elif source_is_hub or target_is_hub:
-                hub_adjacent.append(edge)
+        for edge in stable_edges:
+            if is_hub(edge.source_name) or is_hub(edge.target_name):
+                identity.append(edge)
             else:
-                long_tail.append(edge)
+                dynamics.append(edge)
 
-        # P2 and P3 sorted by recency (P1 enters almost entirely by default)
-        hub_adjacent.sort(key=lambda e: e.recency_key or "", reverse=True)
-        long_tail.sort(key=lambda e: e.recency_key or "", reverse=True)
+        # Sort both by recency within their group
+        identity.sort(key=lambda e: e.recency_key or "", reverse=True)
+        dynamics.sort(key=lambda e: e.recency_key or "", reverse=True)
 
-        selected: list[EdgeRecord] = []
-        remaining = budget
+        return identity, dynamics
 
-        for tier in (hub_to_hub, hub_adjacent, long_tail):
-            for edge in tier:
-                if edge.char_cost > remaining:
-                    continue
-                selected.append(edge)
-                remaining -= edge.char_cost
-
-        return selected
-
-    # ── Formatting (mirrors V1 structure for LLM consistency) ────────────
+    # ── Formatting (4-section structure) ─────────────────────────────────
 
     @staticmethod
     def _format_compilation(
+        episode_lines: list[str],
+        active_lines: list[str],
         node_lines: list[str],
-        edge_lines: list[str],
+        identity_edge_lines: list[str],
+        dynamics_lines: list[str],
     ) -> str:
         sections = []
 
-        if node_lines:
+        if episode_lines:
             sections.append(
-                "#### 1. CONCEPTUAL DEFINITIONS & IDENTITY ####\n"
-                "# (Understanding what these concepts mean specifically for this user)\n"
-                + "\n".join(node_lines)
+                "#### 1. SESSION HISTORY ####\n"
+                "# (Chronological record of recent conversations — what was discussed and when)\n"
+                + "\n".join(episode_lines)
             )
 
-        if edge_lines:
+        if active_lines:
             sections.append(
-                "#### 2. RELATIONAL DYNAMICS & CAUSALITY ####\n"
-                "# (How these concepts interact and evolve over time)\n"
-                + "\n".join(edge_lines)
+                "#### 2. ACTIVE CONTEXT ####\n"
+                "# (Recently updated facts and relationships — what's current and top of mind)\n"
+                + "\n".join(active_lines)
+            )
+
+        if node_lines or identity_edge_lines:
+            identity_parts = []
+            if node_lines:
+                identity_parts.extend(node_lines)
+            if identity_edge_lines:
+                identity_parts.extend(identity_edge_lines)
+            sections.append(
+                "#### 3. CORE IDENTITY & DEFINITIONS ####\n"
+                "# (Stable facts about who this person is and their key relationships)\n"
+                + "\n".join(identity_parts)
+            )
+
+        if dynamics_lines:
+            sections.append(
+                "#### 4. BEHAVIORAL PATTERNS & DYNAMICS ####\n"
+                "# (Therapeutic patterns, coping mechanisms, and relational dynamics)\n"
+                + "\n".join(dynamics_lines)
             )
 
         if not sections:
@@ -361,11 +571,19 @@ class HydrationV2Engine:
 
         content = "\n\n".join(sections)
 
-        total_chars = sum(len(l) for l in node_lines) + sum(len(l) for l in edge_lines)
+        total_chars = (
+            sum(len(l) for l in episode_lines)
+            + sum(len(l) for l in active_lines)
+            + sum(len(l) for l in node_lines)
+            + sum(len(l) for l in identity_edge_lines)
+            + sum(len(l) for l in dynamics_lines)
+        )
         est_tokens = total_chars // 4
+        all_edges = len(active_lines) + len(identity_edge_lines) + len(dynamics_lines)
         stats = (
             f"\n\n### STATS ###\n"
-            f"# Definitions: {len(node_lines)} | Relations: {len(edge_lines)} | Est. Tokens: ~{est_tokens}"
+            f"# Episodes: {len(episode_lines)} | Entities: {len(node_lines)} "
+            f"| Relations: {all_edges} | Est. Tokens: ~{est_tokens}"
         )
 
         return content + stats

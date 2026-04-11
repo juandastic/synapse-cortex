@@ -7,6 +7,7 @@ class CompilationMetadata:
     total_estimated_tokens: int
     included_node_ids: list[str] = field(default_factory=list)
     included_edge_ids: list[str] = field(default_factory=list)
+    included_episode_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
