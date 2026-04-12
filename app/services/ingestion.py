@@ -178,7 +178,8 @@ class IngestionService:
                 # Summarize the episode and store on the Neo4j node.
                 # Runs AFTER complete_job so the client isn't blocked.
                 if result.episode:
-                    summary = await self._summarize_episode(episode_content)
+                    with posthog_user_context(request.userId, posthog_trace_id, request.sessionId):
+                        summary = await self._summarize_episode(episode_content)
                     if summary:
                         await self._store_episode_summary(result.episode.uuid, summary)
                         logger.info(f"Stored episode summary ({len(summary)} chars)")
