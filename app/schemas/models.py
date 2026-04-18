@@ -71,6 +71,7 @@ class IngestAcceptedResponse(BaseModel):
     status: Literal["processing", "skipped"]
     userKnowledgeCompilation: str | None = None
     compilationMetadata: CompilationMetadataResponse | None = None
+    cacheName: str | None = Field(default=None, description="Gemini CachedContent resource name for the compilation (when caching is active)")
 
 
 class GraphStatsResponse(BaseModel):
@@ -90,6 +91,7 @@ class IngestStatusResponse(BaseModel):
     compilationMetadata: CompilationMetadataResponse | None = None
     graphStats: GraphStatsResponse | None = None
     metadata: IngestResponseMetadata | None = None
+    cacheName: str | None = Field(default=None, description="Gemini CachedContent resource name for the compilation (when caching is active)")
     error: str | None = None
     code: str | None = None
 
@@ -134,9 +136,29 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    """Request body for the /v1/chat/completions endpoint."""
+    """Request body for the /v1/chat/completions endpoint.
+
+    The client sends ``system_instruction``, ``compilation``, and ``messages``
+    as independent fields. The server inlines the compilation into the system
+    prompt unless ``cache_name`` points at an active Gemini cache. The legacy
+    shape (single ``role=system`` message) is still accepted.
+    """
 
     messages: list[ChatMessage]
+    system_instruction: str | None = Field(
+        default=None,
+        description="Persona/behavior instructions.",
+    )
+    compilation: str | None = Field(
+        default=None,
+        description="User's compiled knowledge graph text. Sent even when "
+                    "cache_name is set so the server can fall back to inlining "
+                    "if the cache is stale.",
+    )
+    cache_name: str | None = Field(
+        default=None,
+        description="Gemini CachedContent resource name for the compilation.",
+    )
     model: str = Field(default="gemini-3-flash-preview", description="Model to use for completion")
     stream: bool = Field(default=True, description="Whether to stream the response")
     compilationMetadata: CompilationMetadataResponse | None = None
@@ -144,6 +166,9 @@ class ChatCompletionRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Convex session ID for PostHog $ai_session_id grouping")
     rag_usage_fields: dict[str, object] = Field(default_factory=dict, exclude=True)
     posthog_trace_id: str = Field(default="", exclude=True)
+    # Server-side mutable state used by generation. Not part of the public API.
+    cache_fallback_triggered: bool = Field(default=False, exclude=True)
+    cache_fallback_error: str = Field(default="", exclude=True)
 
 
 class ChatCompletionDelta(BaseModel):
@@ -174,6 +199,9 @@ class UsageData(BaseModel):
     rag_nodes: int | None = Field(default=None, description="Entity nodes injected into the prompt")
     rag_search_ms: float | None = Field(default=None, description="Graphiti search latency in ms")
     rag_context_chars: int | None = Field(default=None, description="Characters of RAG context injected")
+    cache_enabled: bool | None = Field(default=None, description="Whether explicit Gemini cache was used for this request")
+    cache_hit: bool | None = Field(default=None, description="Whether Gemini reported cached_content_token_count > 0")
+    cache_fallback_triggered: bool | None = Field(default=None, description="Whether a cache error forced fallback to full prompt")
 
 
 class ChatCompletionChunk(BaseModel):
@@ -206,6 +234,7 @@ class HydrateResponse(BaseModel):
     userKnowledgeCompilation: str | None = None
     compilationMetadata: CompilationMetadataResponse | None = None
     graphStats: GraphStatsResponse | None = None
+    cacheName: str | None = Field(default=None, description="Gemini CachedContent resource name for the compilation (when caching is active)")
     error: str | None = None
     code: str | None = None
 

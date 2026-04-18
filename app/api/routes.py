@@ -16,6 +16,7 @@ from opentelemetry import trace
 
 from app.api.dependencies import (
     ApiKeyDep,
+    CacheManagerDep,
     GenerationServiceDep,
     GraphitiDep,
     GraphServiceDep,
@@ -174,6 +175,7 @@ async def ingest_status(
     job_id: str,
     _api_key: ApiKeyDep,
     hydration_service: HydrationServiceDep,
+    cache_manager: CacheManagerDep,
     version: Literal["v1", "v2"] = Query("v1"),
 ) -> IngestStatusResponse:
     """
@@ -246,6 +248,30 @@ async def ingest_status(
                     "ingest.metadata.episode_id": ingest_metadata.episode_id,
                 },
             )
+        # Create Gemini cache for this compilation (skipped for small ones).
+        cache_start = time.monotonic()
+        cache_name, cache_skip_reason = await cache_manager.create_compilation_cache(
+            job.user_id, result.compilation_text,
+        )
+        cache_creation_ms = round((time.monotonic() - cache_start) * 1000, 2)
+        set_span_attributes(
+            span,
+            {
+                "cache.created": cache_name is not None,
+                "cache.name": cache_name or "",
+                "cache.skip_reason": cache_skip_reason,
+                "cache.creation_duration_ms": cache_creation_ms,
+                "cache.compilation_size_chars": len(result.compilation_text),
+            },
+        )
+        span.add_event(
+            "cache_created" if cache_name else "cache_skipped",
+            {
+                "size_chars": len(result.compilation_text),
+                "skip_reason": cache_skip_reason,
+            },
+        )
+
         remove_job(job_id)
         set_span_attributes(
             span,
@@ -262,6 +288,7 @@ async def ingest_status(
             compilationMetadata=_to_metadata_response(result.metadata),
             graphStats=_to_graph_stats_response(result.graph_stats),
             metadata=ingest_metadata,
+            cacheName=cache_name,
         )
 
     # job.status == "failed"
@@ -287,6 +314,7 @@ async def hydrate_user(
     request: HydrateRequest,
     _api_key: ApiKeyDep,
     hydration_service: HydrationServiceDep,
+    cache_manager: CacheManagerDep,
 ) -> HydrateResponse:
     """
     Get the current user knowledge compilation without processing new data.
@@ -308,12 +336,30 @@ async def hydrate_user(
         result = await hydration_service.build_user_knowledge(
             request.userId, version=request.version,
         )
+        # Create Gemini cache for this compilation (skipped for small ones).
+        cache_start = time.monotonic()
+        cache_name, cache_skip_reason = await cache_manager.create_compilation_cache(
+            request.userId, result.compilation_text,
+        )
+        cache_creation_ms = round((time.monotonic() - cache_start) * 1000, 2)
         set_span_attributes(
             span,
             {
                 "hydrate.success": True,
                 "hydrate.compilation_size_chars": len(result.compilation_text),
                 "hydrate.duration_ms": round((time.monotonic() - start) * 1000, 2),
+                "cache.created": cache_name is not None,
+                "cache.name": cache_name or "",
+                "cache.skip_reason": cache_skip_reason,
+                "cache.creation_duration_ms": cache_creation_ms,
+                "cache.compilation_size_chars": len(result.compilation_text),
+            },
+        )
+        span.add_event(
+            "cache_created" if cache_name else "cache_skipped",
+            {
+                "size_chars": len(result.compilation_text),
+                "skip_reason": cache_skip_reason,
             },
         )
         mark_span_success(span)
@@ -322,6 +368,7 @@ async def hydrate_user(
             userKnowledgeCompilation=result.compilation_text,
             compilationMetadata=_to_metadata_response(result.metadata),
             graphStats=_to_graph_stats_response(result.graph_stats),
+            cacheName=cache_name,
         )
     except Exception as e:
         category, code = classify_error(e)
@@ -349,6 +396,7 @@ async def chat_completions(
     _api_key: ApiKeyDep,
     generation_service: GenerationServiceDep,
     graphiti: GraphitiDep,
+    cache_manager: CacheManagerDep,
 ):
     """
     OpenAI-compatible chat completions endpoint with streaming.
@@ -382,6 +430,31 @@ async def chat_completions(
             "chat.compilation.edges_count": len(cm.included_edge_ids),
         }
 
+    # --- Gemini cache decision ---
+    # Client forwards cache_name from a prior hydration/ingest. When present,
+    # generation uses cached_content; otherwise the compilation is inlined.
+    # Stale caches trigger a transparent fallback in the generation service.
+    cache_skip_reason = ""
+    if not request.cache_name:
+        if not request.compilation:
+            cache_skip_reason = "no_compilation_in_request"
+        else:
+            cache_skip_reason = "no_cache_name_from_client"
+
+    cache_attrs: dict[str, object] = {
+        "cache.enabled": request.cache_name is not None,
+        "cache.name": request.cache_name or "",
+        "cache.skip_reason": cache_skip_reason,
+        "cache.compilation_chars": len(request.compilation or ""),
+    }
+    span.add_event(
+        "cache_decision",
+        {
+            "enabled": request.cache_name is not None,
+            "reason": cache_skip_reason or "using_cache",
+        },
+    )
+
     # --- PostHog trace: emit early so RAG span and generation group under it ---
     request.posthog_trace_id = new_trace_id()
     capture_trace(
@@ -389,6 +462,11 @@ async def chat_completions(
         request.posthog_trace_id,
         name="chat_completion",
         session_id=request.session_id,
+        properties={
+            "cache_enabled": request.cache_name is not None,
+            "cache_skip_reason": cache_skip_reason,
+            "cache_compilation_size_chars": len(request.compilation or ""),
+        },
     )
 
     # --- GraphRAG Context Retrieval ---
@@ -406,11 +484,12 @@ async def chat_completions(
             "chat.has_images": has_images,
             **compilation_attrs,
             **rag_attrs,
+            **cache_attrs,
         },
     )
     mark_span_success(span)
     return StreamingResponse(
-        generation_service.stream_chat_completion(request),
+        generation_service.stream_chat_completion(request, cache_manager=cache_manager),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

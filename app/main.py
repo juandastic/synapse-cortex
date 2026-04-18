@@ -19,6 +19,7 @@ from app.api.routes import router
 from app.core.config import create_genai_client, create_posthog_genai_client, get_settings
 from app.core.posthog import get_posthog, init_posthog, set_posthog_genai_client, shutdown_posthog
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
+from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
@@ -109,6 +110,15 @@ async def lifespan(app: FastAPI):
     await graphiti.build_indices_and_constraints()
     logger.info("Graphiti indices and constraints initialized")
 
+    # Cache manager uses the raw client because the PostHog AsyncClient
+    # wrapper does not expose the .caches API. Cache model MUST match the
+    # chat model (Gemini caches are model-bound).
+    cache_manager = CacheManager(
+        raw_client=raw_genai_client,
+        model=settings.chat_model,
+        default_ttl="3600s",
+    )
+
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
     ingestion_service = IngestionService(graphiti, settings.graphiti_model, generation_client)
@@ -126,6 +136,7 @@ async def lifespan(app: FastAPI):
     # Store in app state for dependency injection
     app.state.neo4j_driver = neo4j_driver
     app.state.graphiti = graphiti
+    app.state.cache_manager = cache_manager
     app.state.hydration_service = hydration_service
     app.state.ingestion_service = ingestion_service
     app.state.generation_service = generation_service

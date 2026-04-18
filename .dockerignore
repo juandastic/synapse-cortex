@@ -12,6 +12,12 @@ ENV/
 .env
 .env.*
 
+# GCP Service Account keys — never bake into the image
+synapse-*.json
+*-service-account*.json
+*-sa-key*.json
+gcp-*.json
+
 # Git
 .git/
 .gitignore

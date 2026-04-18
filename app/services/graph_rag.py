@@ -341,9 +341,19 @@ async def maybe_run_graph_rag(
             posthog_trace_id=request.posthog_trace_id,
         )
         if rag_result.has_context:
-            request.messages = build_messages_with_context(
-                request.messages, rag_result.context_block,
-            )
+            augmented = _RAG_HEADER + rag_result.context_block
+            # New-shape clients send system_instruction as a separate field;
+            # append the RAG context there so it flows into the effective
+            # system prompt alongside persona instructions. Otherwise fall
+            # back to mutating the legacy system message.
+            if request.system_instruction is not None:
+                request.system_instruction = (
+                    request.system_instruction + augmented
+                )
+            else:
+                request.messages = build_messages_with_context(
+                    request.messages, rag_result.context_block,
+                )
         return GraphRagOutcome(enabled=True, result=rag_result)
     except Exception:
         logger.exception("GraphRAG context retrieval failed, proceeding without it")

@@ -9,6 +9,7 @@ from fastapi import Depends, Request
 from graphiti_core import Graphiti
 
 from app.core.security import verify_api_key
+from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
@@ -46,6 +47,11 @@ def get_graphiti(request: Request) -> Graphiti:
     return request.app.state.graphiti
 
 
+def get_cache_manager(request: Request) -> CacheManager:
+    """Get the Gemini cache manager from app state."""
+    return request.app.state.cache_manager
+
+
 def get_notion_export_service(request: Request) -> NotionExportService:
     """Get the Notion export service from app state."""
     return request.app.state.notion_export_service
@@ -62,5 +68,6 @@ IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
 GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 GraphitiDep = Annotated[Graphiti, Depends(get_graphiti)]
+CacheManagerDep = Annotated[CacheManager, Depends(get_cache_manager)]
 NotionExportServiceDep = Annotated[NotionExportService, Depends(get_notion_export_service)]
 NotionCorrectionServiceDep = Annotated[NotionCorrectionService, Depends(get_notion_correction_service)]
