@@ -33,7 +33,14 @@ services:
       - NEO4J_URI=bolt://neo4j:7687
       - NEO4J_USER=neo4j
       - NEO4J_PASSWORD=${NEO4J_PASSWORD}
-      - VERTEX_API_KEY=${VERTEX_API_KEY}
+      # Gemini auth — in order of preference:
+      # 1. GCP_PROJECT + GCP_CREDENTIALS_JSON (Vertex AI full — REQUIRED for caching)
+      # 2. VERTEX_API_KEY (Vertex Express — no caching support)
+      # 3. GOOGLE_API_KEY (AI Studio)
+      - GCP_PROJECT=${GCP_PROJECT:-}
+      - GCP_LOCATION=${GCP_LOCATION:-global}
+      - GCP_CREDENTIALS_JSON=${GCP_CREDENTIALS_JSON:-}
+      - VERTEX_API_KEY=${VERTEX_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - SYNAPSE_API_SECRET=${SYNAPSE_API_SECRET}
       - SEMAPHORE_LIMIT=${SEMAPHORE_LIMIT:-3}

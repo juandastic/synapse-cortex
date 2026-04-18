@@ -32,6 +32,7 @@ The chat interface that connects to this backend lives in a separate repository:
 - [Data Flow](#data-flow)
 - [Technology Stack](#technology-stack)
 - [Observability in Axiom](#observability-in-axiom)
+- [Gemini Context Caching](#gemini-context-caching)
 - [Notion Export](#notion-export)
 - [Notion Correction Import](#notion-correction-import)
 - [Setup & Deployment](#setup--deployment)
@@ -80,12 +81,19 @@ The system is built on [Graphiti](https://github.com/getzep/graphiti), a tempora
 - **Automatic Gating**: Skips retrieval when the graph fits entirely in the prompt (`is_partial: false`)
 - **Zero-LLM Overhead**: No agent or tool-calling loop — deterministic pipeline with ~1s latency
 
-### 5. 🗺️ Knowledge Graph Visualization
+### 5. 💾 Gemini Context Caching
+- **Explicit CachedContent**: Compilation is stored server-side in Gemini as a reusable cached prefix, cutting ~75% of input token cost on repeated turns
+- **Transparent Fallback**: Stale or missing caches auto-recover by inlining the full compilation in a single retry, no client retry logic needed
+- **TTL Refresh on Hit**: Successful cache hits extend TTL fire-and-forget so active users never hit expiration mid-session
+- **Stateless**: The `cacheName` is returned to the client and forwarded on each chat request — the backend keeps no user→cache map
+- **Size-Gated**: Compilations below ~1k tokens skip caching (Gemini minimum), falling back to inlining without overhead
+
+### 6. 🗺️ Knowledge Graph Visualization
 - **React-Force-Graph Format**: Nodes and links ready for frontend rendering
 - **Real-Time Corrections**: Natural language memory edits via Graphiti's episode pipeline
 - **Temporal Filtering**: Only shows valid (non-expired) relationships
 
-### 6. 📤 Notion Export
+### 7. 📤 Notion Export
 - **Graph-to-Notion Pipeline**: Exports a user's knowledge graph into structured Notion databases with a summary page
 - **Dynamic Schema Design**: Gemini analyzes the graph and designs 3-10 category databases with optimal column schemas
 - **MCP Agent Integration**: Uses the Notion MCP server via `create_react_agent` for flexible row creation and page building
@@ -94,13 +102,13 @@ The system is built on [Graphiti](https://github.com/getzep/graphiti), a tempora
 - **Feedback Loop Columns**: Every database includes "Needs Review" (checkbox) and "Correction Notes" (rich_text) for corrections
 - **Per-Request Auth**: Notion token is passed per-request (not server-side) for multi-tenant use
 
-### 7. 🔄 Notion Correction Import
+### 8. 🔄 Notion Correction Import
 - **Feedback Loop**: Reads user corrections from exported Notion databases and applies them back to the knowledge graph
 - **Smart Row Updates**: MCP agent intelligently updates affected columns or deletes rows that are no longer relevant
 - **Graphiti Integration**: Uses `add_episode()` with `custom_extraction_instructions` to ensure corrections are language-consistent and properly contradict outdated edges
 - **Partial Failure Handling**: Individual correction failures don't block the pipeline; detailed failure reports included in the result
 
-### 8. 🔐 Security & Rate Limiting
+### 9. 🔐 Security & Rate Limiting
 - **API Key Authentication**: All endpoints (except `/health`) require `X-API-SECRET` header
 - **Concurrency Control**: Configurable semaphore limits to avoid LLM rate limits (429 errors)
 - **CORS Middleware**: Supports cross-origin requests for web frontends
@@ -819,6 +827,178 @@ Pipeline steps reported via `currentStep`: `"scanning"` → `"applying"` → `"d
 ```
 
 **Note**: Terminal states (`"completed"` or `"failed"`) remove the job from memory after the response is returned.
+
+---
+
+## Gemini Context Caching
+
+### Overview
+
+Every chat turn sends the user's compiled knowledge (~30k tokens) as part of the prompt. Without caching, each request re-bills those tokens at full price. Gemini's **explicit context caching** stores the compilation server-side as a reusable prefix, so only the short per-turn delta (system date, user message, RAG context) is billed at full price — typically **~75% cheaper on repeated tokens** and materially lower TTFT because the cached prefix is pre-tokenized.
+
+This implementation is **stateless on the Cortex side**: the `cacheName` is returned to the client after creation, the client persists it, and forwards it on every `POST /v1/chat/completions`. Cortex does not hold a user→cache map in memory.
+
+### Why explicit caching (not implicit)
+
+Google GenAI offers two caching modes:
+
+| Mode | Trigger | Min size | Hit guarantee | Chosen? |
+|------|---------|----------|---------------|---------|
+| **Implicit** | Automatic on prompt prefix match | — | Best-effort | ❌ |
+| **Explicit** | Manual `caches.create` with resource name | ~1k tokens | Guaranteed when `cached_content` is passed | ✅ |
+
+Explicit caching gives deterministic cost savings and hit rates, which is critical when the 30k-token compilation dominates the input budget.
+
+### Lifecycle
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                      CACHE CREATION                               │
+│                                                                   │
+│  POST /hydrate  or  GET /ingest/status/{jobId} (completed)        │
+│       │                                                           │
+│       ▼                                                           │
+│  HydrationService.build_user_knowledge()                          │
+│       │                                                           │
+│       ▼                                                           │
+│  CacheManager.create_compilation_cache(userId, compilation)       │
+│       │                                                           │
+│       ├─▶ len(compilation) < 4000 chars? → skip, return None      │
+│       │                                                           │
+│       └─▶ genai.caches.create(                                    │
+│              system_instruction=compilation,                      │
+│              ttl="3600s",                                         │
+│              model=<chat_model>,                                 │
+│            ) → "cachedContents/xyz..."                           │
+│                                                                   │
+│  Response includes cacheName — client persists it alongside       │
+│  the user's compilation metadata.                                 │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│                       CACHE USAGE                                 │
+│                                                                   │
+│  POST /v1/chat/completions { messages, cache_name, compilation }  │
+│       │                                                           │
+│       ▼                                                           │
+│  GenerationService.stream_chat_completion()                       │
+│       │                                                           │
+│       ├─▶ cache_name set? → call Gemini with                      │
+│       │     config=GenerateContentConfig(cached_content=<name>)   │
+│       │     (compilation NOT inlined — it lives in the cache)     │
+│       │                                                           │
+│       ▼                                                           │
+│  Peek first chunk under try/except                                │
+│       │                                                           │
+│       ├─▶ Success: stream chunks, track usage_metadata            │
+│       │      │                                                   │
+│       │      └─▶ On final chunk: if cached_content_token_count>0 │
+│       │           fire-and-forget CacheManager.refresh_ttl()     │
+│       │                                                          │
+│       └─▶ Cache error (404, expired, model mismatch):            │
+│            ├─▶ CacheManager.invalidate_by_name(cache_name)       │
+│            ├─▶ Rebuild contents with compilation INLINED         │
+│            └─▶ Retry once — always succeeds (same payload as     │
+│                pre-cache era)                                     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Fallback behavior
+
+Caches can become stale in several ways: TTL expired, cache deleted upstream, the cache's model doesn't match the request's model. The generation service treats all of these uniformly:
+
+1. **Peek** the first stream chunk under `try/except` — the Gemini SDK is lazy, so cache errors surface when we pull the first chunk, not when we open the stream.
+2. **Detect** cache errors with a string-match allowlist (`cachedcontent`, `cache expired`, `does not match the model in the cached content`, etc.).
+3. **Invalidate** the stale cache name (`caches.delete`) so no one else hits it.
+4. **Rebuild** the request contents with `inline_compilation=True` and retry **once**. This retry uses the exact payload we would have sent if caching had never been enabled — it always succeeds under the same upstream conditions.
+5. **Signal** the fallback to the client via `usage.cache_fallback_triggered = true` in the final SSE chunk. The client uses this to schedule a background re-hydrate so the next turn gets a fresh cache.
+
+The user never sees an error — the fallback adds ~500ms (one extra peek + retry) to the first affected turn and resolves itself by the next one.
+
+### TTL refresh on hit
+
+Gemini caches expire by **wallclock**, not usage. Without active extension, a user in an active conversation would hit expiration at exactly the 60-minute mark and force a fallback.
+
+After every successful cache hit (`cached_content_token_count > 0`), the generation service spawns a fire-and-forget `caches.update(ttl="3600s")` task. This pushes the expiration window forward, so actively-used caches live indefinitely.
+
+The task is held in a module-level `_background_tasks` set (Python's asyncio only keeps weak references to tasks — without a strong ref, the GC could drop the task mid-execution).
+
+### Client responsibilities
+
+The Cortex server is stateless regarding cache ownership. The client (e.g. [synapse-chat-ai](https://github.com/juandastic/synapse-chat-ai)) must:
+
+1. **Persist `cacheName`** returned by `/hydrate` or `/ingest/status/{jobId}`.
+2. **Forward it** on every chat request as `cache_name` (alongside `compilation` — the server needs both: cache for the happy path, compilation for the fallback).
+3. **Refresh after fallback** — when the SSE response's final usage chunk has `cache_fallback_triggered: true`, schedule a `/hydrate` call so the next turn has a valid cache.
+4. **Clear on user/persona change** — caches are scoped to a user's compilation; switching contexts means the old `cacheName` is meaningless.
+
+### Constraints
+
+| Constraint | Value | Reason |
+|------------|-------|--------|
+| Minimum size | 4000 chars (~1000 tokens) | Gemini API hard floor |
+| Default TTL | 3600s (1h) | Balances storage cost vs. active-user retention |
+| Model binding | Cache model must equal request model | Gemini returns 400 `INVALID_ARGUMENT` otherwise — caught and fallback-triggered |
+| Auth | Full Vertex AI (GCP_PROJECT + credentials) or AI Studio (GOOGLE_API_KEY) | Vertex Express (`VERTEX_API_KEY`) does NOT support caching |
+
+The chat model setting (`CHAT_MODEL`) must match what clients send in `request.model`. If they diverge, every chat request triggers the model-mismatch fallback — functionally correct but defeats the cache savings.
+
+### Observability
+
+The `cache.*` attribute namespace in Axiom exposes cache decisions and outcomes:
+
+| Attribute | Description |
+|-----------|-------------|
+| `cache.enabled` | Whether this request was sent with a `cache_name` |
+| `cache.name` | The `cachedContents/...` resource name used |
+| `cache.skip_reason` | Why caching was skipped (`no_compilation_in_request`, `no_cache_name_from_client`, `compilation_too_small`) |
+| `cache.hit` | True when Gemini reported `cached_content_token_count > 0` |
+| `cache.hit_ratio` | `cached_tokens / prompt_tokens` |
+| `cache.fallback_triggered` | True when the cache errored and we retried with inlined compilation |
+| `cache.fallback_error` | Truncated error message that triggered the fallback |
+| `cache.compilation_chars` | Size of the compilation that would have been inlined |
+| `cache.creation_duration_ms` | Latency of `caches.create` (on `/hydrate` and `/ingest/status`) |
+
+Cache hit ratio over time:
+
+```apl
+['synapse-cortex-traces']
+| where name == 'chat.completion.stream'
+| where ['attributes.cache.enabled'] == true
+| summarize
+    requests = count(),
+    avg_hit_ratio = avg(['attributes.cache.hit_ratio']),
+    hit_rate = (countif(['attributes.cache.hit'] == true) * 100.0 / count()),
+    fallback_rate = (countif(['attributes.cache.fallback_triggered'] == true) * 100.0 / count())
+  by bin_auto(_time)
+```
+
+Token savings estimate from caching:
+
+```apl
+['synapse-cortex-traces']
+| where name == 'chat.completion.stream'
+| where ['attributes.cache.hit'] == true
+| summarize
+    cached_tokens = sum(['attributes.chat.tokens.cached']),
+    total_prompt_tokens = sum(['attributes.chat.tokens.prompt']),
+    savings_pct = (sum(['attributes.chat.tokens.cached']) * 100.0 / sum(['attributes.chat.tokens.prompt']))
+  by model = ['attributes.chat.model']
+```
+
+Fallback events (each line = one cache-error recovery):
+
+```apl
+['synapse-cortex-traces']
+| where name == 'chat.completion.stream'
+| where ['attributes.cache.fallback_triggered'] == true
+| project
+    _time,
+    cache_name = ['attributes.cache.name'],
+    error = ['attributes.cache.fallback_error'],
+    prompt_tokens = ['attributes.chat.tokens.prompt']
+| order by _time desc
+```
 
 ---
 
