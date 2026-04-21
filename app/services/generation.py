@@ -35,25 +35,6 @@ from app.schemas.models import (
 from app.services.cache_manager import CacheManager
 
 
-# Error substrings that indicate the Gemini cache is no longer valid.
-_CACHE_ERROR_MARKERS = (
-    "cachedcontent",
-    "cached_content",
-    "cached content",
-    "cache not found",
-    "cache expired",
-    "cache has expired",
-    "invalid cached",
-    # Cache is model-bound; request model != cache model triggers 400.
-    "does not match the model in the cached content",
-)
-
-
-def _looks_like_cache_error(err: BaseException) -> bool:
-    """Best-effort detection of Gemini cache-related errors."""
-    msg = str(err).lower()
-    return any(marker in msg for marker in _CACHE_ERROR_MARKERS)
-
 logger = logging.getLogger(__name__)
 
 # Strong refs for fire-and-forget background tasks. asyncio only keeps weak
@@ -170,12 +151,28 @@ class GenerationService:
                         first = None
                     return iterator, first
 
+                # Fire-and-forget TTL bump alongside the upstream call so
+                # idle gaps between a user's requests don't silently expire
+                # the cache. Runs concurrently — no added latency.
+                if use_cache and cache_manager is not None and active_cache_name:
+                    _spawn_background(
+                        cache_manager.refresh_ttl(active_cache_name)
+                    )
+
                 try:
                     stream_iter, first_chunk = await _open_and_peek(active_cache_name)
                 except Exception as open_err:
-                    if use_cache and _looks_like_cache_error(open_err):
+                    # Any failure on the first cached upstream call falls back
+                    # to a no-cache retry. The fallback also recovers from
+                    # non-cache errors (e.g. transient 5xx, model resolution
+                    # blips) at the cost of one extra round-trip when the
+                    # second call fails the same way. Trace attributes
+                    # (cache.fallback_triggered / cache.fallback_error) make
+                    # this visible in Axiom regardless of root cause.
+                    if use_cache:
                         logger.warning(
-                            "Gemini cache %s rejected, falling back to full prompt: %s",
+                            "Gemini cached call failed, falling back to full prompt "
+                            "(cache=%s): %s",
                             active_cache_name, open_err,
                         )
                         request.cache_fallback_triggered = True
