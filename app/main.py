@@ -116,7 +116,9 @@ async def lifespan(app: FastAPI):
     cache_manager = CacheManager(
         raw_client=raw_genai_client,
         model=settings.chat_model,
-        default_ttl="3600s",
+        # 15 min aligns with typical in-session gap (median 4-7 min, p95 ~15 min).
+        # Shorter TTL reduces post-session idle storage; fallback handles rare misses.
+        default_ttl="900s",
     )
 
     # Initialize services

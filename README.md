@@ -863,11 +863,11 @@ Explicit caching gives deterministic cost savings and hit rates, which is critic
 │       ▼                                                           │
 │  CacheManager.create_compilation_cache(userId, compilation)       │
 │       │                                                           │
-│       ├─▶ len(compilation) < 4000 chars? → skip, return None      │
+│       ├─▶ len(compilation) < 16000 chars? → skip, return None     │
 │       │                                                           │
 │       └─▶ genai.caches.create(                                    │
 │              system_instruction=compilation,                      │
-│              ttl="3600s",                                         │
+│              ttl="900s",                                          │
 │              model=<chat_model>,                                 │
 │            ) → "cachedContents/xyz..."                           │
 │                                                                   │
@@ -917,9 +917,9 @@ The user never sees an error — the fallback adds ~500ms (one extra peek + retr
 
 ### TTL refresh on hit
 
-Gemini caches expire by **wallclock**, not usage. Without active extension, a user in an active conversation would hit expiration at exactly the 60-minute mark and force a fallback.
+Gemini caches expire by **wallclock**, not usage. Without active extension, a user in an active conversation would hit expiration at the 15-minute mark and force a fallback.
 
-After every successful cache hit (`cached_content_token_count > 0`), the generation service spawns a fire-and-forget `caches.update(ttl="3600s")` task. This pushes the expiration window forward, so actively-used caches live indefinitely.
+After every successful cache hit (`cached_content_token_count > 0`), the generation service spawns a fire-and-forget `caches.update(ttl="900s")` task. This pushes the expiration window forward, so actively-used caches live as long as the user keeps typing (typical in-session gap: 4-7 min).
 
 The task is held in a module-level `_background_tasks` set (Python's asyncio only keeps weak references to tasks — without a strong ref, the GC could drop the task mid-execution).
 
@@ -936,8 +936,8 @@ The Cortex server is stateless regarding cache ownership. The client (e.g. [syna
 
 | Constraint | Value | Reason |
 |------------|-------|--------|
-| Minimum size | 4000 chars (~1000 tokens) | Gemini API hard floor |
-| Default TTL | 3600s (1h) | Balances storage cost vs. active-user retention |
+| Minimum size | 16000 chars (~4000 tokens) | Below this, storage cost exceeds savings from cheaper reads |
+| Default TTL | 900s (15m) | Covers typical in-session gap; minimizes post-session idle storage |
 | Model binding | Cache model must equal request model | Gemini returns 400 `INVALID_ARGUMENT` otherwise — caught and fallback-triggered |
 | Auth | Full Vertex AI (GCP_PROJECT + credentials) or AI Studio (GOOGLE_API_KEY) | Vertex Express (`VERTEX_API_KEY`) does NOT support caching |
 

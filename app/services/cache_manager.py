@@ -13,9 +13,10 @@ from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-# Gemini Flash requires 1,024+ tokens to create a cache; ~4 chars per token
-# is a conservative estimate. Below this we skip caching.
-MIN_CHARS_FOR_CACHE = 4_000
+# Gemini Pro requires 4,096+ tokens to create a cache; ~4 chars per token
+# is a conservative estimate. Below this the storage cost outweighs the
+# savings from cheaper cached reads, so we skip caching and send inline.
+MIN_CHARS_FOR_CACHE = 16_000
 
 
 class CacheManager:
@@ -25,7 +26,7 @@ class CacheManager:
         self,
         raw_client: genai.Client,
         model: str,
-        default_ttl: str = "3600s",
+        default_ttl: str = "900s",
     ):
         # Uses the raw genai.Client (not the PostHog wrapper) because the
         # PostHog AsyncClient does not expose the .caches API.
