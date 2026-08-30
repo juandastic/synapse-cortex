@@ -30,6 +30,7 @@ from app.schemas.models import (
     ChatCompletionDelta,
     ChatCompletionRequest,
     ChatMessage,
+    GroundingSource,
     UsageData,
 )
 from app.services.cache_manager import CacheManager
@@ -40,6 +41,57 @@ logger = logging.getLogger(__name__)
 # Strong refs for fire-and-forget background tasks. asyncio only keeps weak
 # references, so without this the GC can drop tasks mid-execution.
 _background_tasks: set[asyncio.Task] = set()
+_MAX_GROUNDING_SOURCES_IN_RESPONSE = 10
+
+
+def _collect_grounding_metadata(
+    chunk,
+    queries: set[str],
+    sources: dict[str, GroundingSource],
+    supports: set[tuple[object, object, tuple[int, ...]]],
+) -> str | None:
+    """Collect deduplicated search metadata from one streamed Gemini chunk."""
+    rendered_search_entry_point: str | None = None
+    for candidate in getattr(chunk, "candidates", None) or []:
+        metadata = getattr(candidate, "grounding_metadata", None)
+        if not metadata:
+            continue
+
+        search_entry_point = getattr(metadata, "search_entry_point", None)
+        rendered_content = getattr(search_entry_point, "rendered_content", None)
+        if isinstance(rendered_content, str) and rendered_content.strip():
+            # Preserve Google's provided HTML/CSS byte-for-byte. Its display
+            # requirements prohibit changing the Search Suggestion appearance.
+            rendered_search_entry_point = rendered_content
+
+        for query in getattr(metadata, "web_search_queries", None) or []:
+            normalized = str(query).strip()
+            if normalized:
+                queries.add(normalized)
+
+        for grounding_chunk in getattr(metadata, "grounding_chunks", None) or []:
+            web = getattr(grounding_chunk, "web", None)
+            if not web:
+                continue
+            uri = str(getattr(web, "uri", "") or "").strip()
+            if not uri.startswith(("https://", "http://")):
+                continue
+            title = str(getattr(web, "title", "") or "").strip() or uri
+            sources.setdefault(uri, GroundingSource(title=title, uri=uri))
+
+        for support in getattr(metadata, "grounding_supports", None) or []:
+            segment = getattr(support, "segment", None)
+            start_index = getattr(segment, "start_index", None)
+            end_index = getattr(segment, "end_index", None)
+            chunk_indices = tuple(
+                int(index)
+                for index in (
+                    getattr(support, "grounding_chunk_indices", None) or []
+                )
+            )
+            supports.add((start_index, end_index, chunk_indices))
+
+    return rendered_search_entry_point
 
 
 def _spawn_background(coro) -> None:
@@ -51,8 +103,9 @@ def _spawn_background(coro) -> None:
 class GenerationService:
     """Service for generating chat completions using Google Gemini."""
 
-    def __init__(self, client):
+    def __init__(self, client, *, grounding_enabled: bool = True):
         self._client = client
+        self._grounding_enabled = grounding_enabled
         # Detect if the client is a PostHog-wrapped AsyncClient
         self._is_posthog_client = hasattr(client, "models") and hasattr(
             client.models, "_ph_client"
@@ -82,6 +135,10 @@ class GenerationService:
         response_chars = 0
         finish_reason = "stop"
         seen_finish_reasons: list[str] = []
+        grounding_queries: set[str] = set()
+        grounding_sources: dict[str, GroundingSource] = {}
+        grounding_supports: set[tuple[object, object, tuple[int, ...]]] = set()
+        grounding_search_entry_point: str | None = None
         tracer = trace.get_tracer(__name__)
 
         with tracer.start_as_current_span(
@@ -92,6 +149,7 @@ class GenerationService:
                 "chat.messages_count": len(request.messages),
                 "cache.enabled": request.cache_name is not None,
                 "cache.name": request.cache_name or "",
+                "grounding.enabled": self._grounding_enabled,
             },
         ) as span:
             try:
@@ -215,6 +273,15 @@ class GenerationService:
 
                     raw_chunk_count += 1
 
+                    rendered_search_entry_point = _collect_grounding_metadata(
+                        chunk,
+                        grounding_queries,
+                        grounding_sources,
+                        grounding_supports,
+                    )
+                    if rendered_search_entry_point is not None:
+                        grounding_search_entry_point = rendered_search_entry_point
+
                     # Capture usage_metadata from each chunk; the last one is definitive
                     if chunk.usage_metadata:
                         usage_metadata = chunk.usage_metadata
@@ -249,8 +316,14 @@ class GenerationService:
                         )
                         yield f"data: {content_chunk.model_dump_json()}\n\n"
 
+                grounding_used = bool(
+                    grounding_queries
+                    or grounding_sources
+                    or grounding_supports
+                    or grounding_search_entry_point
+                )
+
                 # Build usage data from the final chunk's metadata
-                usage_data = None
                 if usage_metadata:
                     cached_tokens = getattr(usage_metadata, "cached_content_token_count", None)
                     prompt_tokens = usage_metadata.prompt_token_count or 0
@@ -264,6 +337,15 @@ class GenerationService:
                         cache_enabled=use_cache,
                         cache_hit=cache_hit,
                         cache_fallback_triggered=request.cache_fallback_triggered,
+                        grounding_enabled=self._grounding_enabled,
+                        grounding_used=grounding_used,
+                        grounding_query_count=len(grounding_queries),
+                        grounding_source_count=len(grounding_sources),
+                        grounding_support_count=len(grounding_supports),
+                        grounding_search_entry_point=grounding_search_entry_point,
+                        grounding_sources=list(grounding_sources.values())[
+                            :_MAX_GROUNDING_SOURCES_IN_RESPONSE
+                        ],
                         **request.rag_usage_fields,
                     )
                     hit_ratio = (
@@ -291,6 +373,50 @@ class GenerationService:
                             "cache.hit_ratio": round(hit_ratio, 4),
                             "cache.fallback_triggered": request.cache_fallback_triggered,
                             "cache.fallback_error": request.cache_fallback_error,
+                        },
+                    )
+                else:
+                    usage_data = UsageData(
+                        prompt_tokens=0,
+                        completion_tokens=0,
+                        total_tokens=0,
+                        cache_enabled=use_cache,
+                        cache_hit=False,
+                        cache_fallback_triggered=request.cache_fallback_triggered,
+                        grounding_enabled=self._grounding_enabled,
+                        grounding_used=grounding_used,
+                        grounding_query_count=len(grounding_queries),
+                        grounding_source_count=len(grounding_sources),
+                        grounding_support_count=len(grounding_supports),
+                        grounding_search_entry_point=grounding_search_entry_point,
+                        grounding_sources=list(grounding_sources.values())[
+                            :_MAX_GROUNDING_SOURCES_IN_RESPONSE
+                        ],
+                        **request.rag_usage_fields,
+                    )
+
+                set_span_attributes(
+                    span,
+                    {
+                        "grounding.used": grounding_used,
+                        "grounding.query_count": len(grounding_queries),
+                        "grounding.source_count": len(grounding_sources),
+                        "grounding.support_count": len(grounding_supports),
+                        "grounding.search_entry_point_present": bool(
+                            grounding_search_entry_point
+                        ),
+                    },
+                )
+                if grounding_used:
+                    span.add_event(
+                        "google_search_grounding_used",
+                        {
+                            "query_count": len(grounding_queries),
+                            "source_count": len(grounding_sources),
+                            "support_count": len(grounding_supports),
+                            "search_entry_point_present": bool(
+                                grounding_search_entry_point
+                            ),
                         },
                     )
 
@@ -373,6 +499,19 @@ class GenerationService:
                         "chat.stream_chunks_count": chunk_count,
                         "chat.response_chars": response_chars,
                         "chat.total_duration_ms": round((time.monotonic() - start_total) * 1000, 2),
+                        "grounding.enabled": self._grounding_enabled,
+                        "grounding.used": bool(
+                            grounding_queries
+                            or grounding_sources
+                            or grounding_supports
+                            or grounding_search_entry_point
+                        ),
+                        "grounding.query_count": len(grounding_queries),
+                        "grounding.source_count": len(grounding_sources),
+                        "grounding.support_count": len(grounding_supports),
+                        "grounding.search_entry_point_present": bool(
+                            grounding_search_entry_point
+                        ),
                         "upstream.status_code": upstream_status_code,
                         "upstream.error_type": type(e).__name__,
                         "upstream.error_message": truncate_error_message(str(e)),
@@ -401,15 +540,25 @@ class GenerationService:
         When ``cache_name`` is provided, ``cached_content`` is passed to Gemini
         so the cached system_instruction is used as a prefix.
         """
+        config_kwargs: dict = {}
+        if cache_name:
+            config_kwargs["cached_content"] = cache_name
+        elif self._grounding_enabled:
+            # Gemini forbids declaring tools in a request that also uses
+            # cached_content. CacheManager stores the same tool in the cache.
+            config_kwargs["tools"] = [
+                types.Tool(google_search=types.GoogleSearch())
+            ]
         config = (
-            types.GenerateContentConfig(cached_content=cache_name)
-            if cache_name else None
+            types.GenerateContentConfig(**config_kwargs)
+            if config_kwargs else None
         )
 
         if self._is_posthog_client:
-            posthog_props: dict[str, str] = {}
+            posthog_props: dict[str, object] = {}
             if session_id:
                 posthog_props["$ai_session_id"] = session_id
+            posthog_props["grounding_enabled"] = self._grounding_enabled
             kwargs: dict = {
                 "model": model,
                 "contents": contents,

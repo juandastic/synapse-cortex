@@ -27,12 +27,14 @@ class CacheManager:
         raw_client: genai.Client,
         model: str,
         default_ttl: str = "900s",
+        grounding_enabled: bool = True,
     ):
         # Uses the raw genai.Client (not the PostHog wrapper) because the
         # PostHog AsyncClient does not expose the .caches API.
         self._client = raw_client
         self._model = model
         self._ttl = default_ttl
+        self._grounding_enabled = grounding_enabled
 
     async def create_compilation_cache(
         self,
@@ -54,13 +56,18 @@ class CacheManager:
             return None, "compilation_too_small"
 
         try:
+            cache_config: dict = {
+                "display_name": f"compilation_{user_id}",
+                "system_instruction": compilation_text,
+                "ttl": self._ttl,
+            }
+            if self._grounding_enabled:
+                cache_config["tools"] = [
+                    types.Tool(google_search=types.GoogleSearch())
+                ]
             cache = await self._client.aio.caches.create(
                 model=self._model,
-                config=types.CreateCachedContentConfig(
-                    display_name=f"compilation_{user_id}",
-                    system_instruction=compilation_text,
-                    ttl=self._ttl,
-                ),
+                config=types.CreateCachedContentConfig(**cache_config),
             )
         except Exception as e:
             logger.warning(

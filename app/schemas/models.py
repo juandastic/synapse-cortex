@@ -186,6 +186,13 @@ class ChatCompletionChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class GroundingSource(BaseModel):
+    """A web source returned by Gemini Google Search grounding."""
+
+    title: str = Field(..., description="Source title or domain")
+    uri: str = Field(..., description="Grounding redirect URL returned by Gemini")
+
+
 class UsageData(BaseModel):
     """Token usage statistics for a generation request (OpenAI-compatible)."""
 
@@ -202,6 +209,13 @@ class UsageData(BaseModel):
     cache_enabled: bool | None = Field(default=None, description="Whether explicit Gemini cache was used for this request")
     cache_hit: bool | None = Field(default=None, description="Whether Gemini reported cached_content_token_count > 0")
     cache_fallback_triggered: bool | None = Field(default=None, description="Whether a cache error forced fallback to full prompt")
+    grounding_enabled: bool = Field(default=True, description="Whether Google Search was available to Gemini")
+    grounding_used: bool = Field(default=False, description="Whether Gemini actually executed a grounded web search")
+    grounding_query_count: int = Field(default=0, description="Number of unique Google Search queries executed")
+    grounding_source_count: int = Field(default=0, description="Number of unique web sources returned")
+    grounding_support_count: int = Field(default=0, description="Number of answer segments backed by grounding sources")
+    grounding_search_entry_point: str | None = Field(default=None, description="Google-provided HTML/CSS for required Search Suggestions")
+    grounding_sources: list[GroundingSource] = Field(default_factory=list, description="Web sources returned by Gemini")
 
 
 class ChatCompletionChunk(BaseModel):

@@ -119,12 +119,16 @@ async def lifespan(app: FastAPI):
         # 15 min aligns with typical in-session gap (median 4-7 min, p95 ~15 min).
         # Shorter TTL reduces post-session idle storage; fallback handles rare misses.
         default_ttl="900s",
+        grounding_enabled=settings.grounding_enabled,
     )
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
     ingestion_service = IngestionService(graphiti, settings.graphiti_model, generation_client)
-    generation_service = GenerationService(generation_client)
+    generation_service = GenerationService(
+        generation_client,
+        grounding_enabled=settings.grounding_enabled,
+    )
     graph_service = GraphService(neo4j_driver, graphiti)
     notion_export_service = NotionExportService(
         hydration_service=hydration_service,

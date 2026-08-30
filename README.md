@@ -598,8 +598,17 @@ data: {"id":"chatcmpl-abc123","choices":[{"delta":{"role":"assistant"},...}]}
 
 data: {"id":"chatcmpl-abc123","choices":[{"delta":{"content":"Today"},...}]}
 
+data: {"id":"chatcmpl-abc123","choices":[{"finish_reason":"stop",...}],"usage":{"grounding_enabled":true,"grounding_used":true,"grounding_query_count":1,"grounding_source_count":3,"grounding_support_count":2,"grounding_search_entry_point":"<div>...</div>","grounding_sources":[{"title":"example.org","uri":"https://..."}]}}
+
 data: [DONE]
 ```
+
+Google Search grounding is available by default. Gemini decides whether to
+search for each request. Set `GROUNDING_ENABLED=false` to remove the tool from
+chat generations. The final usage chunk distinguishes availability from actual
+use and includes source metadata without exposing the generated search queries.
+When present, clients must render `grounding_search_entry_point` unchanged with
+the grounded response to display Google's required Search Suggestions.
 
 ---
 
@@ -867,6 +876,7 @@ Explicit caching gives deterministic cost savings and hit rates, which is critic
 │       │                                                           │
 │       └─▶ genai.caches.create(                                    │
 │              system_instruction=compilation,                      │
+│              tools=[google_search] (when grounding is enabled),   │
 │              ttl="900s",                                          │
 │              model=<chat_model>,                                 │
 │            ) → "cachedContents/xyz..."                           │
@@ -885,6 +895,7 @@ Explicit caching gives deterministic cost savings and hit rates, which is critic
 │       │                                                           │
 │       ├─▶ cache_name set? → call Gemini with                      │
 │       │     config=GenerateContentConfig(cached_content=<name>)   │
+│       │     (Google Search is already declared in the cache)      │
 │       │     (compilation NOT inlined — it lives in the cache)     │
 │       │                                                           │
 │       ▼                                                           │
@@ -1307,7 +1318,7 @@ Per-step breakdown (graph correction vs Notion row update):
    │   - Extract system prompt (now includes RAG context)
    │   - Prepend to first user message
    │   - Map roles: user/assistant → user/model
-   └─▶ Call gemini.generate_content_stream()
+   └─▶ Call gemini.generate_content_stream() with Google Search available
 
 4. GEMINI API
    └─▶ Stream token chunks
@@ -1316,6 +1327,7 @@ Per-step breakdown (graph correction vs Notion row update):
    ├─▶ Wrap chunks in OpenAI SSE format
    │   data: {"choices": [{"delta": {"content": "..."}}]}
    ├─▶ Include RAG stats in final usage chunk (rag_enabled, rag_edges, etc.)
+   ├─▶ Include grounding decision, counts, and sources in final usage chunk
    └─▶ Send [DONE] marker
 
 6. CLIENT
@@ -1397,6 +1409,7 @@ The API now emits structured OpenTelemetry attributes for request-level and serv
 - `graph.*`: graph retrieval/correction context and result counts
 - `db.*`: Neo4j query type, records returned, query latency
 - `upstream.*`: upstream status/error hints for Gemini and HTTP calls
+- `grounding.*`: Google Search availability, actual use, query/source/support counts
 - `error.*`: normalized category/code/type/message for failures
 
 ### Query ideas (Axiom)
@@ -1495,6 +1508,7 @@ Create a `.env` file based on `.env.example`:
 | `NEO4J_PASSWORD` | Neo4j password | - | Yes |
 | `GOOGLE_API_KEY` | Google Gemini API key | - | Yes |
 | `GRAPHITI_MODEL` | Gemini model for Graphiti | `gemini-3-flash-preview` | No |
+| `GROUNDING_ENABLED` | Make Google Search available to chat generations | `true` | No |
 | `SYNAPSE_API_SECRET` | API authentication secret | - | Yes |
 | `SEMAPHORE_LIMIT` | Max concurrent LLM operations | `3` | No |
 
@@ -1756,4 +1770,3 @@ To replace the demo content entirely:
 1. Edit or regenerate `scripts/seed_demo.json`
 2. Re-run Steps 1–2 with a new temporary group_id
 3. Commit the updated `scripts/seed_data/demo_graph.json`
-

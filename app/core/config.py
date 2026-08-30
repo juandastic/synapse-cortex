@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # because Gemini caches are model-bound: a cache created for model A
     # cannot be used with model B (400 INVALID_ARGUMENT).
     chat_model: str = "gemini-3.1-pro-preview"
+    # Make Google Search available to chat generations. Gemini still decides
+    # whether a search is useful for each individual request.
+    grounding_enabled: bool = True
 
     # API Security
     synapse_api_secret: str
