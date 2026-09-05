@@ -44,16 +44,6 @@ class IngestResponseMetadata(BaseModel):
     episode_id: str | None = Field(default=None, description="UUID of the created episode")
 
 
-class IngestResponse(BaseModel):
-    """Response body for the /ingest endpoint (legacy sync flow)."""
-
-    success: bool
-    userKnowledgeCompilation: str | None = None
-    metadata: IngestResponseMetadata | None = None
-    error: str | None = None
-    code: str | None = None
-
-
 class CompilationMetadataResponse(BaseModel):
     """V2 hydration metadata for GraphRAG deduplication."""
 

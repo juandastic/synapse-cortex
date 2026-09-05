@@ -29,7 +29,6 @@ from app.schemas.models import (
     ChatCompletionChunk,
     ChatCompletionDelta,
     ChatCompletionRequest,
-    ChatMessage,
     GroundingSource,
     UsageData,
 )

@@ -39,7 +39,7 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
-from app.core.posthog import capture_generation, capture_span, capture_trace, new_trace_id
+from app.core.posthog import capture_generation, capture_trace, new_trace_id
 from app.services.hydration import HydrationService
 from app.services.notion_export_job_store import (
     complete_notion_export_job,

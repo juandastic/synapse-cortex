@@ -1,6 +1,7 @@
 import json
 import logging
 from functools import lru_cache
+from types import SimpleNamespace
 
 from google import genai
 from google.oauth2 import service_account
@@ -118,18 +119,6 @@ def create_genai_client(settings: Settings) -> genai.Client:
     raise ValueError("Set GCP_PROJECT, VERTEX_API_KEY, or GOOGLE_API_KEY in .env")
 
 
-class _AioShim:
-    """Shim that exposes `client.aio.models` pointing to PostHog's AsyncModels.
-
-    Graphiti calls `client.aio.models.generate_content(...)`.
-    PostHog's AsyncClient exposes that as `client.models.generate_content(...)`.
-    This bridges the gap so both interfaces work on the same tracked object.
-    """
-
-    def __init__(self, models):
-        self.models = models
-
-
 def create_posthog_genai_client(settings: Settings, posthog_client):
     """Create a PostHog-wrapped async GenAI client for automatic LLM tracking.
 
@@ -162,7 +151,7 @@ def create_posthog_genai_client(settings: Settings, posthog_client):
     )
     # Add .aio.models shim so Graphiti (which calls client.aio.models.generate_content)
     # routes through PostHog's tracked AsyncModels
-    wrapped.aio = _AioShim(wrapped.models)
+    wrapped.aio = SimpleNamespace(models=wrapped.models)
     # The underlying genai.Client for anything that truly needs the raw client
     raw_client = wrapped.models._client
     return wrapped, raw_client

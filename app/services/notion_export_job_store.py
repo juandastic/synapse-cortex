@@ -7,7 +7,7 @@ Job entries are removed from memory after the client reads a terminal state.
 """
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 

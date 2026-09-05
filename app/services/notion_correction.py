@@ -594,7 +594,7 @@ class NotionCorrectionService:
             failed = 0
             failed_list: list[dict] = []
 
-            async with self._create_notion_agent(notion_token) as agent:
+            async with _NotionAgentContext(self._settings, notion_token) as agent:
                 for item in items:
                     item_start = time.monotonic()
                     try:
@@ -649,22 +649,6 @@ class NotionCorrectionService:
             )
             mark_span_success(span)
             return applied, failed, failed_list
-
-    # ------------------------------------------------------------------
-    # MCP agent lifecycle
-    # ------------------------------------------------------------------
-
-    def _create_notion_agent(self, notion_token: str) -> _NotionAgentContext:
-        """Create a context manager that starts the Notion MCP server and returns a LangGraph agent.
-
-        Usage:
-            async with self._create_notion_agent(token) as agent:
-                await agent.astream(...)
-        """
-        return _NotionAgentContext(
-            settings=self._settings,
-            notion_token=notion_token,
-        )
 
     # ------------------------------------------------------------------
     # Graph correction

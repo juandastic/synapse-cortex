@@ -1,17 +1,12 @@
 """
 PostHog LLM Analytics - Initialization and helper functions.
 
-Provides manual capture of $ai_trace, $ai_span, and $ai_generation events
-for LLM observability in PostHog. Uses manual capture instead of the SDK
-wrapper because the project relies on async streaming (client.aio) which
-the PostHog GenAI wrapper does not yet support.
+Manual trace, span, and generation events complement the wrapped GenAI client.
 """
 
 import logging
-import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from typing import Any
 
 from posthog import Posthog
@@ -194,15 +189,3 @@ def posthog_user_context(distinct_id: str, trace_id: str | None = None, session_
     finally:
         models._default_distinct_id = prev_distinct_id
         models._default_properties = prev_properties
-
-
-@dataclass
-class SpanTimer:
-    """Simple timer for measuring span duration."""
-
-    name: str
-    _start: float = field(default_factory=time.monotonic, init=False)
-
-    @property
-    def elapsed_ms(self) -> float:
-        return (time.monotonic() - self._start) * 1000

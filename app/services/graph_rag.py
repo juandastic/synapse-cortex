@@ -6,7 +6,8 @@ turn to retrieve long-tail episodic memories and entity details not covered
 by the static Waterfill base prompt, deduplicates against already-included
 items, and returns a formatted context block ready for injection.
 
-All functions are pure (no mutation of input arguments).
+Retrieval leaves input messages unchanged. Orchestration updates the request
+with the retrieved context.
 """
 
 import html
@@ -143,22 +144,6 @@ def format_nodes(nodes: list[EntityNode]) -> str:
     return "\n".join(lines)
 
 
-def deduplicate_edges(
-    edges: list[EntityEdge],
-    included_ids: set[str],
-) -> list[EntityEdge]:
-    """Return only edges whose UUID is not already in the base prompt."""
-    return [e for e in edges if e.uuid not in included_ids]
-
-
-def deduplicate_nodes(
-    nodes: list[EntityNode],
-    included_ids: set[str],
-) -> list[EntityNode]:
-    """Return only nodes whose UUID is not already in the base prompt."""
-    return [n for n in nodes if n.uuid not in included_ids]
-
-
 def build_context_block(
     edges: list[EntityEdge],
     nodes: list[EntityNode],
@@ -218,7 +203,7 @@ async def retrieve_graph_rag_context(
 ) -> GraphRagResult:
     """Run the full GraphRAG pipeline: query -> search -> dedup -> format.
 
-    This is a pure async function: it reads *messages* to build a query but
+    This function reads *messages* to build a query but
     never modifies them.  The caller is responsible for assembling the final
     message list via ``build_messages_with_context``.
     """
@@ -235,8 +220,8 @@ async def retrieve_graph_rag_context(
         )
     search_ms = (time.monotonic() - start_search) * 1000
 
-    new_edges = deduplicate_edges(results.edges, included_edge_ids)
-    new_nodes = deduplicate_nodes(results.nodes, included_node_ids)
+    new_edges = [edge for edge in results.edges if edge.uuid not in included_edge_ids]
+    new_nodes = [node for node in results.nodes if node.uuid not in included_node_ids]
     context_block = build_context_block(new_edges, new_nodes)
     total_ms = (time.monotonic() - start_total) * 1000
 

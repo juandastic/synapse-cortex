@@ -39,7 +39,7 @@ from pathlib import Path
 
 # Require IPython so top-level await works. Check before loading the rest.
 try:
-    from IPython import embed
+    from IPython.terminal.embed import InteractiveShellEmbed
 except ImportError:
     print("IPython is required for the console (so 'await' works in the REPL).")
     print("Install it with:  pip install ipython")
@@ -121,13 +121,11 @@ async def _setup():
 
 def _run_console(ns: dict) -> None:
     from traitlets.config import Config
-    from IPython.terminal.embed import InteractiveShellEmbed
 
     loop = ns["loop"]
     # Force IPython to run awaited coroutines on OUR loop (same as Neo4j/Graphiti).
     # Otherwise IPython uses get_event_loop() which can be a different loop → "attached to a different loop".
-    def loop_runner(coro):
-        return loop.run_until_complete(coro)
+    loop_runner = loop.run_until_complete
 
     c = Config()
     c.InteractiveShell.autoawait = True

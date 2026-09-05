@@ -93,16 +93,13 @@ class HydrationService:
         user_id: str,
         version: Literal["v1", "v2"] = "v1",
     ) -> HydrationResult:
-        # Fetch total graph counts in parallel with compilation
         graph_stats = await self._fetch_graph_stats(user_id)
 
         if version == "v2":
             engine = HydrationV2Engine(self.driver, self.min_degree)
             result = await engine.build(user_id)
-            result.graph_stats = graph_stats
-            return result
-
-        result = await self._build_v1(user_id)
+        else:
+            result = await self._build_v1(user_id)
         result.graph_stats = graph_stats
         return result
 
