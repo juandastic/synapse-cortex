@@ -23,8 +23,7 @@ MODEL_CONFIG = {
         "reasoning": {"enabled": True, "effort": "high"},
         "images": True,
     },
-    "deepseek/deepseek-v4-pro-0813": {"reasoning": {"effort": "high"}, "images": False},
-    "qwen/qwen3.7-max": {"reasoning": {"enabled": True}, "images": False},
+    "qwen/qwen3.8-max-0902": {"reasoning": {"effort": "high"}, "images": True},
     "moonshotai/kimi-k2.6": {"reasoning": {"enabled": True}, "images": True},
 }
 

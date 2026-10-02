@@ -1773,7 +1773,7 @@ To replace the demo content entirely:
 
 ## Alternative chat generation with OpenRouter
 
-Set `OPEN_ROUTER_API_KEY` to enable the five explicit chat models configured in
+Set `OPEN_ROUTER_API_KEY` to enable the four explicit non-Google chat models configured in
 `app/services/openrouter_generation.py`. Docker Compose forwards this variable
 to the API container. Requests to `/v1/chat/completions` select the alternative
 with `provider: "openrouter"` and an allowed model ID. Omitting `provider` keeps
@@ -1784,7 +1784,10 @@ compiled knowledge and retrieved memories as text, plus the original message
 history. Gemini cache IDs are not sent to OpenRouter and its Google Search tool
 is not enabled there. Graphiti, embeddings, ingestion and the Vertex generation
 service retain their existing clients. OpenRouter errors return SSE error events;
-there is no model fallback. DeepSeek and Qwen reject contexts containing images.
+there is no model fallback. The active choices are GPT-6.1 Sol, Claude Sonnet 5.5,
+Qwen3.8 Max 0902 and Kimi K2.6; all accept images. Removed model IDs are rejected.
+Google models continue to use Vertex. Convex resolves the user assignment and
+freezes it per turn; model identities and usage stay in internal metadata/logs.
 When PostHog is enabled, OpenRouter emits `$ai_generation` events for successful
 and failed calls with trace/session IDs, token usage, reported USD cost and
 latency in seconds. Analytics failures do not interrupt chat generation.

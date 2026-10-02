@@ -46,14 +46,34 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cachedContents", json.dumps(payload))
         self.assertNotIn("google_search", json.dumps(payload))
 
-    async def test_all_five_models_use_requested_reasoning(self):
+    async def test_all_four_models_use_requested_reasoning(self):
+        high_models = {
+            "openai/gpt-6.1-sol",
+            "anthropic/claude-sonnet-5.5",
+            "qwen/qwen3.8-max-0902",
+        }
+        self.assertEqual(set(MODEL_CONFIG), high_models | {"moonshotai/kimi-k2.6"})
         for model in MODEL_CONFIG:
             reasoning = self.service.build_payload(request(model=model))["reasoning"]
             self.assertTrue(reasoning["exclude"])
-            if model in list(MODEL_CONFIG)[:3]:
+            if model in high_models:
                 self.assertEqual(reasoning["effort"], "high")
             else:
                 self.assertTrue(reasoning["enabled"])
+
+    async def test_qwen_max_snapshot_uses_high_reasoning_and_preserves_images(self):
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
+                {"type": "text", "text": "What do you see?"},
+            ],
+        }]
+        payload = self.service.build_payload(
+            request(model="qwen/qwen3.8-max-0902", messages=messages)
+        )
+        self.assertEqual(payload["reasoning"]["effort"], "high")
+        self.assertEqual(payload["messages"][1]["content"], messages[0]["content"])
 
     async def test_images_in_earlier_turn_are_never_silently_dropped(self):
         messages = [
@@ -68,16 +88,17 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
             },
             {"role": "user", "content": "What was in the image?"},
         ]
-        for model in ["deepseek/deepseek-v4-pro-0813", "qwen/qwen3.7-max"]:
-            with self.assertRaises(HTTPException) as error:
-                self.service.build_payload(request(model=model, messages=messages))
-            self.assertEqual(error.exception.status_code, 400)
-        payload = self.service.build_payload(request(messages=messages))
-        self.assertEqual(payload["messages"][1]["content"], messages[0]["content"])
+        for model in MODEL_CONFIG:
+            payload = self.service.build_payload(request(model=model, messages=messages))
+            self.assertEqual(payload["messages"][1]["content"], messages[0]["content"])
 
     async def test_disallows_unknown_models_and_missing_key(self):
-        with self.assertRaises(HTTPException):
-            self.service.build_payload(request(model="openrouter/auto"))
+        for model in [
+            "openrouter/auto", "google/gemini-3.1-pro-preview",
+            "deepseek/deepseek-v4-pro-0813", "qwen/qwen3.7-max",
+        ]:
+            with self.assertRaises(HTTPException):
+                self.service.build_payload(request(model=model))
         self.service._api_key = ""
         with self.assertRaises(HTTPException) as error:
             self.service.build_payload(request())
