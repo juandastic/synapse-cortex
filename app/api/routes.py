@@ -18,6 +18,7 @@ from app.api.dependencies import (
     ApiKeyDep,
     CacheManagerDep,
     GenerationServiceDep,
+    OpenRouterGenerationServiceDep,
     GraphitiDep,
     GraphServiceDep,
     HydrationServiceDep,
@@ -395,6 +396,7 @@ async def chat_completions(
     request: ChatCompletionRequest,
     _api_key: ApiKeyDep,
     generation_service: GenerationServiceDep,
+    openrouter_generation_service: OpenRouterGenerationServiceDep,
     graphiti: GraphitiDep,
     cache_manager: CacheManagerDep,
 ):
@@ -411,6 +413,11 @@ async def chat_completions(
     
     Requires X-API-SECRET header for authentication.
     """
+    if request.provider == "openrouter":
+        openrouter_generation_service.validate_request(request)
+        # This is request-local. The stored Gemini cache stays available for later turns.
+        request.cache_name = None
+
     span = trace.get_current_span()
     system_prompt_chars = 0
     has_images = False
@@ -434,8 +441,8 @@ async def chat_completions(
     # Client forwards cache_name from a prior hydration/ingest. When present,
     # generation uses cached_content; otherwise the compilation is inlined.
     # Stale caches trigger a transparent fallback in the generation service.
-    cache_skip_reason = ""
-    if not request.cache_name:
+    cache_skip_reason = "provider_openrouter" if request.provider == "openrouter" else ""
+    if request.provider == "vertex" and not request.cache_name:
         if not request.compilation:
             cache_skip_reason = "no_compilation_in_request"
         else:
@@ -478,6 +485,7 @@ async def chat_completions(
         span,
         {
             "chat.model": request.model,
+            "chat.provider": request.provider,
             "chat.stream": request.stream,
             "chat.messages_count": len(request.messages),
             "chat.system_prompt_chars": system_prompt_chars,
@@ -489,7 +497,9 @@ async def chat_completions(
     )
     mark_span_success(span)
     return StreamingResponse(
-        generation_service.stream_chat_completion(request, cache_manager=cache_manager),
+        openrouter_generation_service.stream_chat_completion(request)
+        if request.provider == "openrouter"
+        else generation_service.stream_chat_completion(request, cache_manager=cache_manager),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

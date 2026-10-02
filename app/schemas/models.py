@@ -150,6 +150,7 @@ class ChatCompletionRequest(BaseModel):
         description="Gemini CachedContent resource name for the compilation.",
     )
     model: str = Field(default="gemini-3-flash-preview", description="Model to use for completion")
+    provider: Literal["vertex", "openrouter"] = "vertex"
     stream: bool = Field(default=True, description="Whether to stream the response")
     compilationMetadata: CompilationMetadataResponse | None = None
     user_id: str | None = Field(default=None, description="User/group ID for GraphRAG context retrieval")
@@ -191,6 +192,7 @@ class UsageData(BaseModel):
     total_tokens: int = Field(..., description="Total tokens (prompt + completion)")
     thoughts_tokens: int | None = Field(default=None, description="Thinking tokens (Gemini 2.5+ models)")
     cached_tokens: int | None = Field(default=None, description="Tokens served from cache")
+    cost: float | None = Field(default=None, description="Generation cost in USD reported by the provider")
     rag_enabled: bool | None = Field(default=None, description="Whether GraphRAG context retrieval ran")
     rag_edges: int | None = Field(default=None, description="Episodic edges injected into the prompt")
     rag_nodes: int | None = Field(default=None, description="Entity nodes injected into the prompt")

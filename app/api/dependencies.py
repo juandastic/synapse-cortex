@@ -11,6 +11,7 @@ from graphiti_core import Graphiti
 from app.core.security import verify_api_key
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
+from app.services.openrouter_generation import OpenRouterGenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
@@ -35,6 +36,10 @@ def get_ingestion_service(request: Request) -> IngestionService:
 def get_generation_service(request: Request) -> GenerationService:
     """Get the generation service from app state."""
     return request.app.state.generation_service
+
+
+def get_openrouter_generation_service(request: Request) -> OpenRouterGenerationService:
+    return request.app.state.openrouter_generation_service
 
 
 def get_graph_service(request: Request) -> GraphService:
@@ -66,6 +71,7 @@ def get_notion_correction_service(request: Request) -> NotionCorrectionService:
 HydrationServiceDep = Annotated[HydrationService, Depends(get_hydration_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
+OpenRouterGenerationServiceDep = Annotated[OpenRouterGenerationService, Depends(get_openrouter_generation_service)]
 GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 GraphitiDep = Annotated[Graphiti, Depends(get_graphiti)]
 CacheManagerDep = Annotated[CacheManager, Depends(get_cache_manager)]

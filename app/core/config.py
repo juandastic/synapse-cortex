@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     gcp_credentials_json: str = ""
     vertex_api_key: str = ""
     google_api_key: str = ""
+    # Chat generation only. Graphiti, embeddings and Vertex are unchanged.
+    open_router_api_key: str = ""
 
     # Graphiti LLM Configuration (entity extraction, reranking — small prompts)
     graphiti_model: str = "gemini-3-flash-preview"

@@ -1770,3 +1770,24 @@ To replace the demo content entirely:
 1. Edit or regenerate `scripts/seed_demo.json`
 2. Re-run Steps 1–2 with a new temporary group_id
 3. Commit the updated `scripts/seed_data/demo_graph.json`
+
+## Alternative chat generation with OpenRouter
+
+Set `OPEN_ROUTER_API_KEY` to enable the five explicit chat models configured in
+`app/services/openrouter_generation.py`. Docker Compose forwards this variable
+to the API container. Requests to `/v1/chat/completions` select the alternative
+with `provider: "openrouter"` and an allowed model ID. Omitting `provider` keeps
+the existing Gemini generation path.
+
+Both paths use the existing GraphRAG step. OpenRouter receives persona instructions,
+compiled knowledge and retrieved memories as text, plus the original message
+history. Gemini cache IDs are not sent to OpenRouter and its Google Search tool
+is not enabled there. Graphiti, embeddings, ingestion and the Vertex generation
+service retain their existing clients. OpenRouter errors return SSE error events;
+there is no model fallback. DeepSeek and Qwen reject contexts containing images.
+When PostHog is enabled, OpenRouter emits `$ai_generation` events for successful
+and failed calls with trace/session IDs, token usage, reported USD cost and
+latency in seconds. Analytics failures do not interrupt chat generation.
+
+Run `python -m unittest discover -s tests -v` to verify the shared retrieval step,
+provider dispatch, reasoning configuration, image capabilities and SSE handling.

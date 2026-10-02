@@ -21,6 +21,7 @@ from app.core.posthog import get_posthog, init_posthog, set_posthog_genai_client
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
+from app.services.openrouter_generation import OpenRouterGenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
@@ -146,6 +147,7 @@ async def lifespan(app: FastAPI):
     app.state.hydration_service = hydration_service
     app.state.ingestion_service = ingestion_service
     app.state.generation_service = generation_service
+    app.state.openrouter_generation_service = OpenRouterGenerationService(settings.open_router_api_key)
     app.state.graph_service = graph_service
     app.state.notion_export_service = notion_export_service
     app.state.notion_correction_service = notion_correction_service
@@ -156,6 +158,7 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown
     logger.info("Shutting down Synapse Cortex...")
+    await app.state.openrouter_generation_service.close()
     await neo4j_driver.close()
     await graphiti.close()
     shutdown_posthog()
