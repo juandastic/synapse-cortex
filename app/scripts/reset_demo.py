@@ -59,22 +59,19 @@ async def run(group_id: str, dry_run: bool) -> None:
 
     seed = json.loads(SEED_FILE.read_text())
 
-    entity_nodes = [
-        parse_datetime_props(r)
-        for r in apply_group_id(seed["entity_nodes"], group_id)
-    ]
+    entity_nodes = [parse_datetime_props(r) for r in apply_group_id(seed["entity_nodes"], group_id)]
     episodic_nodes = [
-        parse_datetime_props(r)
-        for r in apply_group_id(seed["episodic_nodes"], group_id)
+        parse_datetime_props(r) for r in apply_group_id(seed["episodic_nodes"], group_id)
     ]
     # Split routing info from edge properties for the Cypher query
     relates_to_edges = [
         {
             "source_uuid": e["source_uuid"],
             "target_uuid": e["target_uuid"],
-            "props": parse_datetime_props({
-                k: v for k, v in e.items() if k not in ("source_uuid", "target_uuid")
-            } | {"group_id": group_id}),
+            "props": parse_datetime_props(
+                {k: v for k, v in e.items() if k not in ("source_uuid", "target_uuid")}
+                | {"group_id": group_id}
+            ),
         }
         for e in seed["relates_to_edges"]
     ]

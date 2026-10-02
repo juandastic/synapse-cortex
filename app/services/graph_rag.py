@@ -79,13 +79,12 @@ class GraphRagResult:
 # Pure helpers
 # ---------------------------------------------------------------------------
 
+
 def _extract_text(message: ChatMessage) -> str:
     """Extract plain text from a ChatMessage regardless of content type."""
     if isinstance(message.content, str):
         return message.content
-    return " ".join(
-        part.text for part in message.content if hasattr(part, "text")
-    )
+    return " ".join(part.text for part in message.content if hasattr(part, "text"))
 
 
 def build_search_query(messages: list[ChatMessage]) -> str:
@@ -175,10 +174,12 @@ def build_messages_with_context(
 
     for msg in messages:
         if not found_system and msg.role == "system" and isinstance(msg.content, str):
-            result.append(ChatMessage(
-                role="system",
-                content=msg.content + augmented,
-            ))
+            result.append(
+                ChatMessage(
+                    role="system",
+                    content=msg.content + augmented,
+                )
+            )
             found_system = True
         else:
             result.append(msg)
@@ -192,6 +193,7 @@ def build_messages_with_context(
 # ---------------------------------------------------------------------------
 # Pipeline entry point
 # ---------------------------------------------------------------------------
+
 
 async def retrieve_graph_rag_context(
     graphiti: Graphiti,
@@ -233,9 +235,15 @@ async def retrieve_graph_rag_context(
         "GraphRAG context: %d injected (%d edges, %d nodes), "
         "%d raw (%d edges, %d nodes), "
         "%d deduped (%d edges, %d nodes) in %.1fms",
-        total_injected, len(new_edges), len(new_nodes),
-        len(results.edges) + len(results.nodes), len(results.edges), len(results.nodes),
-        deduped_edges + deduped_nodes, deduped_edges, deduped_nodes,
+        total_injected,
+        len(new_edges),
+        len(new_nodes),
+        len(results.edges) + len(results.nodes),
+        len(results.edges),
+        len(results.nodes),
+        deduped_edges + deduped_nodes,
+        deduped_edges,
+        deduped_nodes,
         total_ms,
     )
     if new_edges:
@@ -249,7 +257,9 @@ async def retrieve_graph_rag_context(
         posthog_trace_id or new_trace_id(),
         name="graphiti.search",
         input_data=[{"role": "user", "content": query[:2000]}],
-        output_data=[{"role": "assistant", "content": context_block[:3000] or "(no relevant context found)"}],
+        output_data=[
+            {"role": "assistant", "content": context_block[:3000] or "(no relevant context found)"}
+        ],
         duration_ms=total_ms,
         properties={
             "pipeline": "graph_rag",
@@ -279,6 +289,7 @@ async def retrieve_graph_rag_context(
 # ---------------------------------------------------------------------------
 # Orchestration: gating, execution, and telemetry mapping
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class GraphRagOutcome:
@@ -332,12 +343,11 @@ async def maybe_run_graph_rag(
             # system prompt alongside persona instructions. Otherwise fall
             # back to mutating the legacy system message.
             if request.system_instruction is not None:
-                request.system_instruction = (
-                    request.system_instruction + augmented
-                )
+                request.system_instruction = request.system_instruction + augmented
             else:
                 request.messages = build_messages_with_context(
-                    request.messages, rag_result.context_block,
+                    request.messages,
+                    rag_result.context_block,
                 )
         return GraphRagOutcome(enabled=True, result=rag_result)
     except Exception:
@@ -354,18 +364,20 @@ def rag_outcome_to_span_attrs(outcome: GraphRagOutcome) -> dict[str, object]:
 
     if outcome.result is not None:
         r = outcome.result
-        attrs.update({
-            "rag.search_duration_ms": r.search_duration_ms,
-            "rag.total_duration_ms": r.total_duration_ms,
-            "rag.raw_edges_count": r.raw_edges_count,
-            "rag.deduped_edges_count": r.deduped_edges_count,
-            "rag.injected_edges_count": r.injected_edges_count,
-            "rag.raw_nodes_count": r.raw_nodes_count,
-            "rag.deduped_nodes_count": r.deduped_nodes_count,
-            "rag.injected_nodes_count": r.injected_nodes_count,
-            "rag.query_chars": r.query_chars,
-            "rag.context_block_chars": r.context_block_chars,
-        })
+        attrs.update(
+            {
+                "rag.search_duration_ms": r.search_duration_ms,
+                "rag.total_duration_ms": r.total_duration_ms,
+                "rag.raw_edges_count": r.raw_edges_count,
+                "rag.deduped_edges_count": r.deduped_edges_count,
+                "rag.injected_edges_count": r.injected_edges_count,
+                "rag.raw_nodes_count": r.raw_nodes_count,
+                "rag.deduped_nodes_count": r.deduped_nodes_count,
+                "rag.injected_nodes_count": r.injected_nodes_count,
+                "rag.query_chars": r.query_chars,
+                "rag.context_block_chars": r.context_block_chars,
+            }
+        )
     return attrs
 
 

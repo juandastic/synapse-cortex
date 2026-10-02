@@ -120,9 +120,7 @@ class OpenRouterGenerationService:
                         body = await response.aread()
                         try:
                             detail = (
-                                json.loads(body)
-                                .get("error", {})
-                                .get("message", "Request rejected")
+                                json.loads(body).get("error", {}).get("message", "Request rejected")
                             )
                         except (ValueError, AttributeError):
                             detail = "Request rejected"
@@ -168,9 +166,9 @@ class OpenRouterGenerationService:
                     "prompt_tokens": usage.get("prompt_tokens", 0),
                     "completion_tokens": usage.get("completion_tokens", 0),
                     "total_tokens": usage.get("total_tokens", 0),
-                    "thoughts_tokens": (
-                        usage.get("completion_tokens_details") or {}
-                    ).get("reasoning_tokens"),
+                    "thoughts_tokens": (usage.get("completion_tokens_details") or {}).get(
+                        "reasoning_tokens"
+                    ),
                     "cached_tokens": (usage.get("prompt_tokens_details") or {}).get(
                         "cached_tokens"
                     ),
@@ -238,9 +236,9 @@ class OpenRouterGenerationService:
             "$ai_reasoning_tokens": (usage.get("completion_tokens_details") or {}).get(
                 "reasoning_tokens"
             ),
-            "$ai_cache_read_input_tokens": (
-                usage.get("prompt_tokens_details") or {}
-            ).get("cached_tokens"),
+            "$ai_cache_read_input_tokens": (usage.get("prompt_tokens_details") or {}).get(
+                "cached_tokens"
+            ),
             "requested_model": request.model,
             "finish_reason": finish_reason,
             **request.rag_usage_fields,
@@ -257,15 +255,11 @@ class OpenRouterGenerationService:
                 input_tokens=usage.get("prompt_tokens"),
                 output_tokens=usage.get("completion_tokens"),
                 error=error,
-                properties={
-                    key: value for key, value in properties.items() if value is not None
-                },
+                properties={key: value for key, value in properties.items() if value is not None},
             )
         except Exception:
             # Analytics must never interrupt chat generation.
-            logger.warning(
-                "Could not capture OpenRouter generation analytics", exc_info=True
-            )
+            logger.warning("Could not capture OpenRouter generation analytics", exc_info=True)
 
     @staticmethod
     def _chunk(completion_id, created, model, delta, finish_reason=None, usage=None):

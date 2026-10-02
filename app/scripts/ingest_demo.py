@@ -70,11 +70,7 @@ async def run(group_id: str) -> None:
     logger.info(f"Loading seed data from {SEED_FILE}")
     seed = json.loads(SEED_FILE.read_text())
 
-    sessions = [
-        session
-        for thread in seed["threads"]
-        for session in thread["sessions"]
-    ]
+    sessions = [session for thread in seed["threads"] for session in thread["sessions"]]
     logger.info(f"Found {len(sessions)} sessions to ingest for group_id={group_id!r}")
 
     graphiti = make_graphiti(settings)
@@ -92,7 +88,9 @@ async def run(group_id: str) -> None:
             reference_time = datetime.fromtimestamp(ended_at / 1000, tz=timezone.utc)
             episode_body = format_messages(messages)
 
-            logger.info(f"[{i}/{len(sessions)}] Ingesting {episode_name} ({len(messages)} messages)...")
+            logger.info(
+                f"[{i}/{len(sessions)}] Ingesting {episode_name} ({len(messages)} messages)..."
+            )
             t0 = time.monotonic()
 
             result = await graphiti.add_episode(
@@ -107,7 +105,9 @@ async def run(group_id: str) -> None:
             elapsed_ms = (time.monotonic() - t0) * 1000
             total_nodes += len(result.nodes)
             total_edges += len(result.edges)
-            logger.info(f"  → {len(result.nodes)} nodes, {len(result.edges)} edges ({elapsed_ms:.0f}ms)")
+            logger.info(
+                f"  → {len(result.nodes)} nodes, {len(result.edges)} edges ({elapsed_ms:.0f}ms)"
+            )
 
     finally:
         await graphiti.close()

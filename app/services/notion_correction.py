@@ -25,14 +25,13 @@ from typing import Any
 from graphiti_core import Graphiti
 from graphiti_core.graphiti import AddEpisodeResults
 from graphiti_core.nodes import EpisodeType
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from notion_client import AsyncClient as NotionAsyncClient
 from notion_client.client import ClientOptions
 from opentelemetry import trace
-
-from langchain_mcp_adapters.tools import load_mcp_tools
 
 from app.core.config import Settings, create_langchain_llm
 from app.core.observability import (
@@ -201,23 +200,20 @@ def _build_row_update_prompt(
         if k not in ("Needs Review", "Correction Notes")
     )
 
-    node_summaries = "\n".join(
-        f"- {node.name}: {node.summary}"
-        for node in episode_result.nodes
-        if node.summary
-    ) or "(none)"
+    node_summaries = (
+        "\n".join(f"- {node.name}: {node.summary}" for node in episode_result.nodes if node.summary)
+        or "(none)"
+    )
 
-    new_facts = "\n".join(
-        f"- {e.fact}"
-        for e in episode_result.edges
-        if e.fact and not e.invalid_at
-    ) or "(none)"
+    new_facts = (
+        "\n".join(f"- {e.fact}" for e in episode_result.edges if e.fact and not e.invalid_at)
+        or "(none)"
+    )
 
-    invalidated_facts = "\n".join(
-        f"- {e.fact}"
-        for e in episode_result.edges
-        if e.fact and e.invalid_at
-    ) or "(none)"
+    invalidated_facts = (
+        "\n".join(f"- {e.fact}" for e in episode_result.edges if e.fact and e.invalid_at)
+        or "(none)"
+    )
 
     return _ROW_UPDATE_PROMPT.format(
         language=language,
@@ -322,7 +318,9 @@ class NotionCorrectionService:
                     )
 
                     correction_items = await self._step_scan(
-                        job_id, notion, database_ids,
+                        job_id,
+                        notion,
+                        database_ids,
                     )
 
                     if not correction_items:
@@ -333,7 +331,8 @@ class NotionCorrectionService:
                             corrections_failed=0,
                             failed_corrections=None,
                             duration_ms=round(
-                                (time.monotonic() - pipeline_start) * 1000, 2,
+                                (time.monotonic() - pipeline_start) * 1000,
+                                2,
                             ),
                         )
                         set_span_attributes(span, {"correction.no_corrections": True})
@@ -341,13 +340,18 @@ class NotionCorrectionService:
                         return
 
                     applied, failed, failed_list = await self._step_apply(
-                        job_id, notion, notion_token, correction_items,
-                        group_id, language,
+                        job_id,
+                        notion,
+                        notion_token,
+                        correction_items,
+                        group_id,
+                        language,
                         posthog_trace_id=posthog_trace_id,
                     )
 
                     duration_ms = round(
-                        (time.monotonic() - pipeline_start) * 1000, 2,
+                        (time.monotonic() - pipeline_start) * 1000,
+                        2,
                     )
                     complete_notion_correction_job(
                         job_id,
@@ -390,7 +394,8 @@ class NotionCorrectionService:
                     )
                     mark_span_error(span, exc, category=category, code=code)
                     logger.exception(
-                        "Notion correction pipeline failed for job %s", job_id,
+                        "Notion correction pipeline failed for job %s",
+                        job_id,
                     )
 
     # ------------------------------------------------------------------
@@ -462,7 +467,9 @@ class NotionCorrectionService:
 
             for category_name, db_id in database_ids.items():
                 items = await self._query_flagged_rows(
-                    notion, db_id, category_name,
+                    notion,
+                    db_id,
+                    category_name,
                 )
                 all_items.extend(items)
                 await asyncio.sleep(_NOTION_RATE_LIMIT_DELAY)
@@ -585,7 +592,9 @@ class NotionCorrectionService:
         posthog_trace_id: str = "",
     ) -> tuple[int, int, list[dict]]:
         update_notion_correction_step(
-            job_id, "applying", corrections_found=len(items),
+            job_id,
+            "applying",
+            corrections_found=len(items),
         )
 
         with tracer.start_as_current_span("notion_correction.apply") as span:
@@ -599,10 +608,15 @@ class NotionCorrectionService:
                     item_start = time.monotonic()
                     try:
                         episode_result = await self._correct_graph(
-                            item, group_id, language,
+                            item,
+                            group_id,
+                            language,
                         )
                         await self._update_notion_row(
-                            agent, item, episode_result, language,
+                            agent,
+                            item,
+                            episode_result,
+                            language,
                         )
                         await self._reset_review_fields(notion, item.page_id)
                         applied += 1
@@ -612,7 +626,9 @@ class NotionCorrectionService:
                             group_id,
                             posthog_trace_id,
                             name="correction.apply_item",
-                            input_data=f"{item.category_name}/{item.title}: {item.correction_notes}"[:1000],
+                            input_data=f"{item.category_name}/{item.title}: {item.correction_notes}"[
+                                :1000
+                            ],
                             output_data=f"{len(episode_result.nodes)} nodes, {len(episode_result.edges)} edges",
                             duration_ms=(time.monotonic() - item_start) * 1000,
                         )
@@ -731,9 +747,7 @@ class NotionCorrectionService:
         ) as span:
             try:
                 start = time.monotonic()
-                async for _step in agent.astream(
-                    {"messages": [("user", prompt)]}
-                ):
+                async for _step in agent.astream({"messages": [("user", prompt)]}):
                     pass
                 set_span_attributes(
                     span,
@@ -798,7 +812,9 @@ class _NotionAgentContext:
         tools = await load_mcp_tools(session)
 
         llm = create_langchain_llm(
-            self._settings, model="gemini-2.5-flash", temperature=0.2,
+            self._settings,
+            model="gemini-2.5-flash",
+            temperature=0.2,
         )
         return create_react_agent(llm, tools)
 

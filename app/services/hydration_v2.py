@@ -32,8 +32,8 @@ from app.services.hydration_result import CompilationMetadata, HydrationResult
 DEFAULT_CHAR_LIMIT = 120_000
 
 # 4-tier budget allocation (rollover cascades: episode -> active -> identity -> dynamics)
-EPISODE_BUDGET_RATIO = 0.08   # ~9.6K chars (episodes are small, ~3K typical)
-ACTIVE_BUDGET_RATIO = 0.12    # ~14.4K chars (recent context, changes frequently)
+EPISODE_BUDGET_RATIO = 0.08  # ~9.6K chars (episodes are small, ~3K typical)
+ACTIVE_BUDGET_RATIO = 0.12  # ~14.4K chars (recent context, changes frequently)
 IDENTITY_BUDGET_RATIO = 0.45  # ~54K chars (nodes + stable hub edges — the bulk)
 DYNAMICS_BUDGET_RATIO = 0.35  # ~42K chars (long-tail behavioral edges)
 
@@ -108,7 +108,7 @@ def _extract_user_lines(content: str, limit: int) -> str:
     for block in content.split("\n\n"):
         block = block.strip()
         if block.startswith(_USER_PREFIX):
-            text = block[len(_USER_PREFIX):].strip()
+            text = block[len(_USER_PREFIX) :].strip()
             if not text:
                 continue
             if total + len(text) > limit:
@@ -193,12 +193,15 @@ class HydrationV2Engine:
                 node_degree_map = {n.name: n.degree for n in nodes}
 
                 if not nodes and not edges and not episodes:
-                    set_span_attributes(span, {
-                        "hydrate.episodes_count": 0,
-                        "hydrate.nodes_count": 0,
-                        "hydrate.edges_count": 0,
-                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
-                    })
+                    set_span_attributes(
+                        span,
+                        {
+                            "hydrate.episodes_count": 0,
+                            "hydrate.nodes_count": 0,
+                            "hydrate.edges_count": 0,
+                            "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                        },
+                    )
                     mark_span_success(span)
                     return HydrationResult(compilation_text="")
 
@@ -213,15 +216,22 @@ class HydrationV2Engine:
                 else:
                     result = self._build_with_budget(episodes, nodes, edges, node_degree_map)
 
-                set_span_attributes(span, {
-                    "hydrate.episodes_count": len(episodes),
-                    "hydrate.nodes_count": len(nodes),
-                    "hydrate.edges_count": len(edges),
-                    "hydrate.is_partial": result.metadata.is_partial if result.metadata else False,
-                    "hydrate.compilation_size_chars": len(result.compilation_text),
-                    "hydrate.total_estimated_tokens": result.metadata.total_estimated_tokens if result.metadata else 0,
-                    "duration_ms": round((time.monotonic() - start) * 1000, 2),
-                })
+                set_span_attributes(
+                    span,
+                    {
+                        "hydrate.episodes_count": len(episodes),
+                        "hydrate.nodes_count": len(nodes),
+                        "hydrate.edges_count": len(edges),
+                        "hydrate.is_partial": result.metadata.is_partial
+                        if result.metadata
+                        else False,
+                        "hydrate.compilation_size_chars": len(result.compilation_text),
+                        "hydrate.total_estimated_tokens": result.metadata.total_estimated_tokens
+                        if result.metadata
+                        else 0,
+                        "duration_ms": round((time.monotonic() - start) * 1000, 2),
+                    },
+                )
                 mark_span_success(span)
                 return result
 
@@ -280,13 +290,15 @@ class HydrationV2Engine:
             if temporal_parts:
                 line += f" [{', '.join(temporal_parts)}]"
 
-            edges.append(EdgeRecord(
-                uuid=r["uuid"],
-                source_name=source,
-                target_name=target,
-                formatted=line,
-                recency_key=r.get("valid_at") or r.get("created_at"),
-            ))
+            edges.append(
+                EdgeRecord(
+                    uuid=r["uuid"],
+                    source_name=source,
+                    target_name=target,
+                    formatted=line,
+                    recency_key=r.get("valid_at") or r.get("created_at"),
+                )
+            )
 
         return edges
 
@@ -298,7 +310,9 @@ class HydrationV2Engine:
         """
         async with self.driver.session() as session:
             result = await session.run(
-                FETCH_EPISODES_QUERY, group_id=group_id, limit=limit,
+                FETCH_EPISODES_QUERY,
+                group_id=group_id,
+                limit=limit,
             )
             records = await result.data()
 
@@ -311,7 +325,8 @@ class HydrationV2Engine:
             summary = r.get("summary") or ""
             if not summary and r.get("content"):
                 summary = _extract_user_lines(
-                    r["content"], EPISODE_CONTENT_FALLBACK_LIMIT,
+                    r["content"],
+                    EPISODE_CONTENT_FALLBACK_LIMIT,
                 )
             if not summary:
                 continue
@@ -326,13 +341,15 @@ class HydrationV2Engine:
         for date_str, summaries in days.items():
             merged = " | ".join(summaries)
             formatted = f"- [{date_str}] {merged}"
-            episodes.append(EpisodeRecord(
-                uuids=uuids_by_day[date_str],
-                name=date_str,
-                valid_at=first_valid_at.get(date_str),
-                summary=merged,
-                formatted=formatted,
-            ))
+            episodes.append(
+                EpisodeRecord(
+                    uuids=uuids_by_day[date_str],
+                    name=date_str,
+                    valid_at=first_valid_at.get(date_str),
+                    summary=merged,
+                    formatted=formatted,
+                )
+            )
         return episodes
 
     # ── Fast Path (everything fits) ──────────────────────────────────────
@@ -348,7 +365,9 @@ class HydrationV2Engine:
         node_degree_map = {n.name: n.degree for n in nodes}
         hub_threshold = self._compute_hub_threshold(node_degree_map)
         identity_edges, dynamics_edges = self._partition_stable_edges(
-            stable_edges, node_degree_map, hub_threshold,
+            stable_edges,
+            node_degree_map,
+            hub_threshold,
         )
 
         compilation = self._format_compilation(
@@ -400,10 +419,13 @@ class HydrationV2Engine:
 
         hub_threshold = self._compute_hub_threshold(node_degree_map)
         identity_edges, dynamics_edges = self._partition_stable_edges(
-            stable_edges, node_degree_map, hub_threshold,
+            stable_edges,
+            node_degree_map,
+            hub_threshold,
         )
         included_identity_edges = self._select_within_budget(
-            identity_edges, identity_edge_budget,
+            identity_edges,
+            identity_edge_budget,
         )
         identity_edges_used = sum(e.char_cost for e in included_identity_edges)
         rollover = identity_edge_budget - identity_edges_used
@@ -413,7 +435,9 @@ class HydrationV2Engine:
         included_dynamics = self._select_within_budget(dynamics_edges, dynamics_budget)
 
         total_chars = (
-            ep_used + active_used + nodes_used
+            ep_used
+            + active_used
+            + nodes_used
             + identity_edges_used
             + sum(e.char_cost for e in included_dynamics)
         )
@@ -503,6 +527,7 @@ class HydrationV2Engine:
         Identity edges: at least one endpoint is a hub (core relationships).
         Dynamics edges: neither endpoint is a hub (behavioral patterns, long-tail).
         """
+
         def is_hub(name: str) -> bool:
             return node_degree_map.get(name, 0) >= hub_threshold
 
@@ -572,11 +597,11 @@ class HydrationV2Engine:
         content = "\n\n".join(sections)
 
         total_chars = (
-            sum(len(l) for l in episode_lines)
-            + sum(len(l) for l in active_lines)
-            + sum(len(l) for l in node_lines)
-            + sum(len(l) for l in identity_edge_lines)
-            + sum(len(l) for l in dynamics_lines)
+            sum(len(line) for line in episode_lines)
+            + sum(len(line) for line in active_lines)
+            + sum(len(line) for line in node_lines)
+            + sum(len(line) for line in identity_edge_lines)
+            + sum(len(line) for line in dynamics_lines)
         )
         est_tokens = total_chars // 4
         all_edges = len(active_lines) + len(identity_edge_lines) + len(dynamics_lines)

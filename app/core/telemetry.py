@@ -44,7 +44,12 @@ def setup_telemetry(app: FastAPI) -> None:
         from opentelemetry.instrumentation.aiohttp_client import AioHttpClientInstrumentor
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
-        from opentelemetry.sdk.resources import DEPLOYMENT_ENVIRONMENT, SERVICE_NAME, SERVICE_VERSION, Resource
+        from opentelemetry.sdk.resources import (
+            DEPLOYMENT_ENVIRONMENT,
+            SERVICE_NAME,
+            SERVICE_VERSION,
+            Resource,
+        )
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 

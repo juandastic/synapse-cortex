@@ -62,13 +62,15 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(reasoning["enabled"])
 
     async def test_qwen_max_snapshot_uses_high_reasoning_and_preserves_images(self):
-        messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
-                {"type": "text", "text": "What do you see?"},
-            ],
-        }]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
+                    {"type": "text", "text": "What do you see?"},
+                ],
+            }
+        ]
         payload = self.service.build_payload(
             request(model="qwen/qwen3.8-max-0902", messages=messages)
         )
@@ -94,8 +96,10 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disallows_unknown_models_and_missing_key(self):
         for model in [
-            "openrouter/auto", "google/gemini-3.1-pro-preview",
-            "deepseek/deepseek-v4-pro-0813", "qwen/qwen3.7-max",
+            "openrouter/auto",
+            "google/gemini-3.1-pro-preview",
+            "deepseek/deepseek-v4-pro-0813",
+            "qwen/qwen3.7-max",
         ]:
             with self.assertRaises(HTTPException):
                 self.service.build_payload(request(model=model))
@@ -113,9 +117,7 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             service = OpenRouterGenerationService("test-secret", client)
-            req = request(
-                user_id="user", session_id="session", posthog_trace_id="trace"
-            )
+            req = request(user_id="user", session_id="session", posthog_trace_id="trace")
             req.rag_usage_fields = {"rag_enabled": True, "rag_nodes": 2}
             chunks = [chunk async for chunk in service.stream_chat_completion(req)]
         return chunks, seen
@@ -270,16 +272,10 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
         req = request()
         with patch("app.api.routes.maybe_run_graph_rag", side_effect=rag):
-            response = await chat_completions(
-                req, "secret", vertex, generator, object(), object()
-            )
-            self.assertEqual(
-                [chunk async for chunk in response.body_iterator], ["answer"]
-            )
+            response = await chat_completions(req, "secret", vertex, generator, object(), object())
+            self.assertEqual([chunk async for chunk in response.body_iterator], ["answer"])
         self.assertEqual(calls, ["validate", "rag", "openrouter"])
-        self.assertIn(
-            "Additional retrieved memory", generator.assert_request.system_instruction
-        )
+        self.assertIn("Additional retrieved memory", generator.assert_request.system_instruction)
         self.assertIsNone(req.cache_name)
         vertex.stream_chat_completion.assert_not_called()
 
@@ -305,9 +301,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
             response = await chat_completions(
                 req, "secret", Vertex(), alternative, object(), object()
             )
-            self.assertEqual(
-                [chunk async for chunk in response.body_iterator], ["gemini answer"]
-            )
+            self.assertEqual([chunk async for chunk in response.body_iterator], ["gemini answer"])
         self.assertEqual(req.provider, "vertex")
         self.assertEqual(req.cache_name, "cachedContents/unchanged")
         alternative.validate_request.assert_not_called()

@@ -1,5 +1,7 @@
 # Synapse Cortex
 
+See [TESTING.md](./TESTING.md) for test setup, protected behaviors and remaining gaps.
+
 **Cognitive backend for the Synapse AI Chat application**. A stateless REST API that processes conversational data into a dynamic knowledge graph, enabling personalized long-term memory and intelligent context retrieval for AI assistants.
 
 ---

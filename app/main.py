@@ -10,9 +10,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from graphiti_core import Graphiti
-from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
-from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
 from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
+from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
 from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
@@ -21,12 +21,12 @@ from app.core.posthog import get_posthog, init_posthog, set_posthog_genai_client
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
-from app.services.openrouter_generation import OpenRouterGenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
 from app.services.notion_correction import NotionCorrectionService
 from app.services.notion_export import NotionExportService
+from app.services.openrouter_generation import OpenRouterGenerationService
 
 # Configure logging
 logging.basicConfig(
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """
     Application lifespan manager.
-    
+
     Initializes database connections and services on startup,
     cleans up on shutdown.
     """
@@ -71,7 +71,8 @@ async def lifespan(app: FastAPI):
     posthog_client = get_posthog()
     if posthog_client:
         posthog_genai_client, raw_genai_client = create_posthog_genai_client(
-            settings, posthog_client,
+            settings,
+            posthog_client,
         )
         # Use the PostHog-wrapped client everywhere — it has .aio.models shim
         # so Graphiti's internal calls (client.aio.models.generate_content)
@@ -105,7 +106,9 @@ async def lifespan(app: FastAPI):
         ),
         max_coroutines=settings.semaphore_limit,
     )
-    logger.info(f"Graphiti initialized with model={settings.graphiti_model}, max_coroutines={settings.semaphore_limit}")
+    logger.info(
+        f"Graphiti initialized with model={settings.graphiti_model}, max_coroutines={settings.semaphore_limit}"
+    )
 
     # Build indices and constraints (safe to call multiple times, only creates if missing)
     await graphiti.build_indices_and_constraints()
@@ -147,7 +150,9 @@ async def lifespan(app: FastAPI):
     app.state.hydration_service = hydration_service
     app.state.ingestion_service = ingestion_service
     app.state.generation_service = generation_service
-    app.state.openrouter_generation_service = OpenRouterGenerationService(settings.open_router_api_key)
+    app.state.openrouter_generation_service = OpenRouterGenerationService(
+        settings.open_router_api_key
+    )
     app.state.graph_service = graph_service
     app.state.notion_export_service = notion_export_service
     app.state.notion_correction_service = notion_correction_service

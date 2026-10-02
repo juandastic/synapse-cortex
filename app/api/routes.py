@@ -5,7 +5,6 @@ API Routes - Endpoint definitions for Synapse Cortex.
 import logging
 import time
 import uuid
-
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -18,13 +17,13 @@ from app.api.dependencies import (
     ApiKeyDep,
     CacheManagerDep,
     GenerationServiceDep,
-    OpenRouterGenerationServiceDep,
     GraphitiDep,
     GraphServiceDep,
     HydrationServiceDep,
     IngestionServiceDep,
     NotionCorrectionServiceDep,
     NotionExportServiceDep,
+    OpenRouterGenerationServiceDep,
 )
 from app.core.observability import (
     anonymize_id,
@@ -58,19 +57,19 @@ from app.schemas.models import (
     NotionExportResult,
     NotionExportStatusResponse,
 )
-from app.services.hydration_result import CompilationMetadata, GraphStats
 from app.services.graph_rag import (
     maybe_run_graph_rag,
     rag_outcome_to_span_attrs,
     rag_outcome_to_usage_fields,
 )
+from app.services.hydration_result import CompilationMetadata, GraphStats
 from app.services.job_store import get_job, remove_job
-from app.services.notion_export import resolve_notion_page_id
 from app.services.notion_correction_job_store import (
     create_notion_correction_job,
     get_notion_correction_job,
     remove_notion_correction_job,
 )
+from app.services.notion_export import resolve_notion_page_id
 from app.services.notion_export_job_store import (
     create_notion_export_job,
     get_notion_export_job,
@@ -112,7 +111,7 @@ def _to_graph_stats_response(
 async def health_check() -> HealthResponse:
     """
     Health check endpoint for load balancers and monitoring.
-    
+
     No authentication required.
     """
     return HealthResponse()
@@ -131,11 +130,11 @@ async def ingest_session(
 ) -> IngestAcceptedResponse:
     """
     Accept a chat session for async processing (fire-and-forget).
-    
+
     Returns 202 immediately with jobId and status. Poll GET /ingest/status/{jobId}
     to check completion. If messages are insufficient, returns "skipped" with
     compilation immediately.
-    
+
     Requires X-API-SECRET header for authentication.
     """
     span = trace.get_current_span()
@@ -181,11 +180,11 @@ async def ingest_status(
 ) -> IngestStatusResponse:
     """
     Poll for ingest job status. Returns full result when completed.
-    
+
     When status is "completed", hydrates compilation from Neo4j on-demand and
     removes the job from memory. When "failed", returns error details and
     removes the job. Returns 404 if job not found.
-    
+
     Requires X-API-SECRET header for authentication.
     """
     span = trace.get_current_span()
@@ -252,7 +251,8 @@ async def ingest_status(
         # Create Gemini cache for this compilation (skipped for small ones).
         cache_start = time.monotonic()
         cache_name, cache_skip_reason = await cache_manager.create_compilation_cache(
-            job.user_id, result.compilation_text,
+            job.user_id,
+            result.compilation_text,
         )
         cache_creation_ms = round((time.monotonic() - cache_start) * 1000, 2)
         set_span_attributes(
@@ -319,28 +319,33 @@ async def hydrate_user(
 ) -> HydrateResponse:
     """
     Get the current user knowledge compilation without processing new data.
-    
+
     This is a read-only endpoint useful for:
     - Debugging the current state of a user's knowledge graph
     - Fetching the compilation without re-indexing
     - Testing the hydration logic
-    
+
     Requires X-API-SECRET header for authentication.
     """
     span = trace.get_current_span()
     start = time.monotonic()
-    set_span_attributes(span, {
-        "hydrate.user_id": anonymize_id(request.userId),
-        "hydrate.version": request.version,
-    })
+    set_span_attributes(
+        span,
+        {
+            "hydrate.user_id": anonymize_id(request.userId),
+            "hydrate.version": request.version,
+        },
+    )
     try:
         result = await hydration_service.build_user_knowledge(
-            request.userId, version=request.version,
+            request.userId,
+            version=request.version,
         )
         # Create Gemini cache for this compilation (skipped for small ones).
         cache_start = time.monotonic()
         cache_name, cache_skip_reason = await cache_manager.create_compilation_cache(
-            request.userId, result.compilation_text,
+            request.userId,
+            result.compilation_text,
         )
         cache_creation_ms = round((time.monotonic() - cache_start) * 1000, 2)
         set_span_attributes(
@@ -402,15 +407,15 @@ async def chat_completions(
 ):
     """
     OpenAI-compatible chat completions endpoint with streaming.
-    
+
     Streams responses using Server-Sent Events (SSE) in the same format
     as OpenAI's API for easy frontend integration.
-    
+
     When ``user_id`` and ``compilationMetadata`` are present and the graph
     was only partially loaded (``is_partial == True``), a GraphRAG
     retrieval step runs before generation to inject long-tail episodic
     memories into the payload.
-    
+
     Requires X-API-SECRET header for authentication.
     """
     if request.provider == "openrouter":
@@ -672,7 +677,7 @@ async def start_notion_export(
                 "duration_ms": round((time.monotonic() - start) * 1000, 2),
             },
         )
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         mark_span_error(
             span,
@@ -686,7 +691,7 @@ async def start_notion_export(
         raise HTTPException(
             status_code=400,
             detail="Failed to connect to Notion. Check your token and page permissions.",
-        )
+        ) from exc
 
     job_id = str(uuid.uuid4())
     create_notion_export_job(job_id, user_id=request.userId, page_name=request.pageName)
@@ -869,7 +874,7 @@ async def start_notion_corrections(
                 "duration_ms": round((time.monotonic() - start) * 1000, 2),
             },
         )
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         mark_span_error(
             span,
@@ -883,7 +888,7 @@ async def start_notion_corrections(
         raise HTTPException(
             status_code=400,
             detail="Failed to connect to Notion. Check your token and page permissions.",
-        )
+        ) from exc
 
     job_id = str(uuid.uuid4())
     create_notion_correction_job(job_id, group_id=request.userId)

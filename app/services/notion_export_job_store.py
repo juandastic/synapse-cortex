@@ -10,7 +10,6 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-
 _jobs: dict[str, "NotionExportJobEntry"] = {}
 
 

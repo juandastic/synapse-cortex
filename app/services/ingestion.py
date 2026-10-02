@@ -17,7 +17,12 @@ from graphiti_core import Graphiti
 from graphiti_core.nodes import EpisodeType
 from opentelemetry import trace
 
-from app.core.observability import classify_error, mark_span_error, mark_span_success, set_span_attributes
+from app.core.observability import (
+    classify_error,
+    mark_span_error,
+    mark_span_success,
+    set_span_attributes,
+)
 from app.core.posthog import capture_span, capture_trace, new_trace_id, posthog_user_context
 from app.schemas.models import (
     IngestAcceptedResponse,
@@ -233,10 +238,12 @@ class IngestionService:
         try:
             response = await self._genai_client.aio.models.generate_content(
                 model=SUMMARY_MODEL,
-                contents=[types.Content(
-                    role="user",
-                    parts=[types.Part.from_text(text=SUMMARY_PROMPT + text)],
-                )],
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=SUMMARY_PROMPT + text)],
+                    )
+                ],
             )
             # response.text is None when the model returns no content (e.g. safety filter)
             return response.text.strip() if response.text else None

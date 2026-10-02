@@ -58,18 +58,16 @@ from app.services.ingestion import IngestionService
 
 def _make_graphiti():
     from graphiti_core import Graphiti
+    from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
     from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
     from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
-    from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
 
     s = get_settings()
     return Graphiti(
         s.neo4j_uri,
         s.neo4j_user,
         s.neo4j_password,
-        llm_client=GeminiClient(
-            config=LLMConfig(api_key=s.google_api_key, model=s.graphiti_model)
-        ),
+        llm_client=GeminiClient(config=LLMConfig(api_key=s.google_api_key, model=s.graphiti_model)),
         embedder=GeminiEmbedder(
             config=GeminiEmbedderConfig(
                 api_key=s.google_api_key,

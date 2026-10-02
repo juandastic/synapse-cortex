@@ -21,6 +21,7 @@ import os
 import time
 from typing import Any
 
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langgraph.prebuilt import create_react_agent
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -28,8 +29,6 @@ from notion_client import AsyncClient as NotionAsyncClient
 from notion_client.client import ClientOptions
 from opentelemetry import trace
 from pydantic import BaseModel, Field
-
-from langchain_mcp_adapters.tools import load_mcp_tools
 
 from app.core.config import Settings, create_langchain_llm
 from app.core.observability import (
@@ -76,8 +75,7 @@ def _safe_schema_validate(cls, obj, *args, **kwargs):  # type: ignore[no-untyped
             obj = {
                 **obj,
                 "properties": {
-                    k: (_PLACEHOLDER_SCHEMA if v is None else v)
-                    for k, v in props.items()
+                    k: (_PLACEHOLDER_SCHEMA if v is None else v) for k, v in props.items()
                 },
             }
     return _orig_schema_validate(cls, obj, *args, **kwargs)
@@ -295,9 +293,7 @@ async def resolve_notion_page_id(notion: NotionAsyncClient, page_name: str) -> s
     )
     results = response.get("results", [])
     for page in results:
-        title_parts = (
-            page.get("properties", {}).get("title", {}).get("title", [])
-        )
+        title_parts = page.get("properties", {}).get("title", {}).get("title", [])
         plain_title = "".join(t.get("plain_text", "") for t in title_parts)
         if plain_title.strip().lower() == page_name.strip().lower():
             return page["id"]
@@ -423,14 +419,19 @@ class NotionExportService:
 
                     # Step 2: Analyze (schema design + entry extraction)
                     analysis = await self._step_analyze(
-                        job_id, compilation_text, language,
+                        job_id,
+                        compilation_text,
+                        language,
                         posthog_trace_id=posthog_trace_id,
                         user_id=user_id,
                     )
 
                     # Step 3: Create Notion databases
                     database_ids = await self._step_create_databases(
-                        job_id, analysis, notion, page_id,
+                        job_id,
+                        analysis,
+                        notion,
+                        page_id,
                     )
 
                     # Steps 4-5 require the MCP agent
@@ -444,11 +445,11 @@ class NotionExportService:
                     )
 
                     total_entries = sum(
-                        len(cat.get("entries", []))
-                        for cat in analysis["categories"]
+                        len(cat.get("entries", [])) for cat in analysis["categories"]
                     )
                     duration_ms = round(
-                        (time.monotonic() - pipeline_start) * 1000, 2,
+                        (time.monotonic() - pipeline_start) * 1000,
+                        2,
                     )
 
                     # Build summary URL from the job store entry (set in step 5)
@@ -457,9 +458,7 @@ class NotionExportService:
                     )
 
                     job_entry = get_notion_export_job(job_id)
-                    summary_url = (
-                        job_entry.summary_page_url if job_entry else None
-                    )
+                    summary_url = job_entry.summary_page_url if job_entry else None
 
                     complete_notion_export_job(
                         job_id,
@@ -509,7 +508,9 @@ class NotionExportService:
                         code=code,
                     )
                     logger.error(
-                        "Notion export failed job=%s: %s", job_id, exc,
+                        "Notion export failed job=%s: %s",
+                        job_id,
+                        exc,
                         exc_info=True,
                     )
 
@@ -557,7 +558,9 @@ class NotionExportService:
             mark_span_success(span)
             if deleted:
                 logger.info(
-                    "Cleaned %d blocks from page %s", deleted, page_id,
+                    "Cleaned %d blocks from page %s",
+                    deleted,
+                    page_id,
                 )
 
     # ------------------------------------------------------------------
@@ -573,7 +576,8 @@ class NotionExportService:
         ) as span:
             start = time.monotonic()
             result = await self._hydration.build_user_knowledge(
-                user_id, version="v1",
+                user_id,
+                version="v1",
             )
             set_span_attributes(
                 span,
@@ -600,7 +604,9 @@ class NotionExportService:
         update_notion_export_step(job_id, "analyzing")
 
         llm = create_langchain_llm(
-            self._settings, model="gemini-2.5-flash", temperature=0.2,
+            self._settings,
+            model="gemini-2.5-flash",
+            temperature=0.2,
         )
 
         # Phase 2a: Design schemas
@@ -652,15 +658,9 @@ class NotionExportService:
                 attributes={"export.category_name": cat["name"]},
             ) as span:
                 start = time.monotonic()
-                prop_desc = ", ".join(
-                    f"{p['name']} ({p['type']})" for p in cat["properties"]
-                )
+                prop_desc = ", ".join(f"{p['name']} ({p['type']})" for p in cat["properties"])
                 title_prop = next(
-                    (
-                        p["name"]
-                        for p in cat["properties"]
-                        if p["type"] == "title"
-                    ),
+                    (p["name"] for p in cat["properties"] if p["type"] == "title"),
                     cat["properties"][0]["name"],
                 )
 
@@ -682,14 +682,17 @@ class NotionExportService:
                     {
                         "export.entries_count": len(cat["entries"]),
                         "duration_ms": round(
-                            (time.monotonic() - start) * 1000, 2,
+                            (time.monotonic() - start) * 1000,
+                            2,
                         ),
                     },
                 )
                 mark_span_success(span)
 
         update_notion_export_step(
-            job_id, "extracting_entries", entries_count=total_entries,
+            job_id,
+            "extracting_entries",
+            entries_count=total_entries,
         )
         return analysis
 
@@ -778,15 +781,26 @@ class NotionExportService:
                 tools = await load_mcp_tools(mcp_session)
 
                 llm = create_langchain_llm(
-                    self._settings, model="gemini-2.5-flash", temperature=0.2,
+                    self._settings,
+                    model="gemini-2.5-flash",
+                    temperature=0.2,
                 )
                 agent = create_react_agent(llm, tools)
 
                 await self._step_populate(
-                    job_id, analysis, database_ids, agent, language,
+                    job_id,
+                    analysis,
+                    database_ids,
+                    agent,
+                    language,
                 )
                 await self._step_create_summary(
-                    job_id, analysis, database_ids, page_id, agent, language,
+                    job_id,
+                    analysis,
+                    database_ids,
+                    page_id,
+                    agent,
+                    language,
                 )
 
     # ------------------------------------------------------------------
@@ -814,15 +828,11 @@ class NotionExportService:
                     continue
 
                 prop_lines = "\n".join(
-                    f"  - **{p['name']}** ({p['type']})"
-                    for p in category["properties"]
+                    f"  - **{p['name']}** ({p['type']})" for p in category["properties"]
                 )
 
                 total = len(all_entries)
-                batches = [
-                    all_entries[i : i + BATCH_SIZE]
-                    for i in range(0, total, BATCH_SIZE)
-                ]
+                batches = [all_entries[i : i + BATCH_SIZE] for i in range(0, total, BATCH_SIZE)]
 
                 for b_idx, batch in enumerate(batches, 1):
                     with tracer.start_as_current_span(
@@ -836,11 +846,7 @@ class NotionExportService:
                     ) as span:
                         start = time.monotonic()
                         entry_lines = "\n".join(
-                            f"  {i}. "
-                            + ", ".join(
-                                f'{k}: "{v}"'
-                                for k, v in e["values"].items()
-                            )
+                            f"  {i}. " + ", ".join(f'{k}: "{v}"' for k, v in e["values"].items())
                             for i, e in enumerate(batch, 1)
                         )
 
@@ -856,15 +862,14 @@ class NotionExportService:
                         )
 
                         try:
-                            async for _step in agent.astream(
-                                {"messages": [("user", prompt)]}
-                            ):
+                            async for _step in agent.astream({"messages": [("user", prompt)]}):
                                 pass
                             set_span_attributes(
                                 span,
                                 {
                                     "duration_ms": round(
-                                        (time.monotonic() - start) * 1000, 2,
+                                        (time.monotonic() - start) * 1000,
+                                        2,
                                     ),
                                 },
                             )
@@ -872,7 +877,10 @@ class NotionExportService:
                         except Exception as exc:
                             category_err, code = classify_error(exc)
                             mark_span_error(
-                                span, exc, category=category_err, code=code,
+                                span,
+                                exc,
+                                category=category_err,
+                                code=code,
                             )
                             logger.warning(
                                 "Populate batch failed job=%s cat=%s batch=%d: %s",
@@ -886,7 +894,8 @@ class NotionExportService:
                 parent_span,
                 {
                     "duration_ms": round(
-                        (time.monotonic() - pipeline_start) * 1000, 2,
+                        (time.monotonic() - pipeline_start) * 1000,
+                        2,
                     ),
                 },
             )
@@ -913,8 +922,7 @@ class NotionExportService:
             start = time.monotonic()
 
             db_bullets = "\n".join(
-                f"   - {cat['name']}: {cat['description']} "
-                f"({len(cat.get('entries', []))} entries)"
+                f"   - {cat['name']}: {cat['description']} ({len(cat.get('entries', []))} entries)"
                 for cat in analysis["categories"]
             )
             overview = analysis.get("overview", "")
@@ -928,16 +936,16 @@ class NotionExportService:
 
             summary_page_id: str | None = None
             try:
-                async for step in agent.astream(
-                    {"messages": [("user", prompt)]}
-                ):
+                async for step in agent.astream({"messages": [("user", prompt)]}):
                     if summary_page_id is None:
                         summary_page_id = _extract_page_id_from_agent_step(step)
             except Exception as exc:
                 category_err, code = classify_error(exc)
                 mark_span_error(span, exc, category=category_err, code=code)
                 logger.warning(
-                    "Summary page creation failed job=%s: %s", job_id, exc,
+                    "Summary page creation failed job=%s: %s",
+                    job_id,
+                    exc,
                 )
                 return
 

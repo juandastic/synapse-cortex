@@ -5,19 +5,17 @@ API Dependencies - Dependency injection for database connections and services.
 from typing import Annotated
 
 from fastapi import Depends, Request
-
 from graphiti_core import Graphiti
 
 from app.core.security import verify_api_key
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
-from app.services.openrouter_generation import OpenRouterGenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.ingestion import IngestionService
 from app.services.notion_correction import NotionCorrectionService
 from app.services.notion_export import NotionExportService
-
+from app.services.openrouter_generation import OpenRouterGenerationService
 
 # Type alias for API key dependency
 ApiKeyDep = Annotated[str, Depends(verify_api_key)]
@@ -71,9 +69,13 @@ def get_notion_correction_service(request: Request) -> NotionCorrectionService:
 HydrationServiceDep = Annotated[HydrationService, Depends(get_hydration_service)]
 IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)]
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
-OpenRouterGenerationServiceDep = Annotated[OpenRouterGenerationService, Depends(get_openrouter_generation_service)]
+OpenRouterGenerationServiceDep = Annotated[
+    OpenRouterGenerationService, Depends(get_openrouter_generation_service)
+]
 GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 GraphitiDep = Annotated[Graphiti, Depends(get_graphiti)]
 CacheManagerDep = Annotated[CacheManager, Depends(get_cache_manager)]
 NotionExportServiceDep = Annotated[NotionExportService, Depends(get_notion_export_service)]
-NotionCorrectionServiceDep = Annotated[NotionCorrectionService, Depends(get_notion_correction_service)]
+NotionCorrectionServiceDep = Annotated[
+    NotionCorrectionService, Depends(get_notion_correction_service)
+]

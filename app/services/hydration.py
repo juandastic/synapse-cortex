@@ -314,8 +314,7 @@ class HydrationService:
         if relationships:
             sections.append(
                 "#### 2. RELATIONAL DYNAMICS & CAUSALITY ####\n"
-                "# (How these concepts interact and evolve over time)\n"
-                + "\n".join(relationships)
+                "# (How these concepts interact and evolve over time)\n" + "\n".join(relationships)
             )
 
         if not sections:

@@ -34,7 +34,8 @@ def neo4j_to_python(val):
     """Recursively convert Neo4j types to JSON-serializable Python values."""
     # Import lazily to avoid hard dependency when neo4j is not installed
     try:
-        from neo4j.time import DateTime, Date, Duration, Time
+        from neo4j.time import Date, DateTime, Duration, Time
+
         if isinstance(val, (DateTime, Date, Time)):
             return val.iso_format()
         if isinstance(val, Duration):

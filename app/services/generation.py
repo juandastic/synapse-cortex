@@ -34,7 +34,6 @@ from app.schemas.models import (
 )
 from app.services.cache_manager import CacheManager
 
-
 logger = logging.getLogger(__name__)
 
 # Strong refs for fire-and-forget background tasks. asyncio only keeps weak
@@ -83,10 +82,7 @@ def _collect_grounding_metadata(
             start_index = getattr(segment, "start_index", None)
             end_index = getattr(segment, "end_index", None)
             chunk_indices = tuple(
-                int(index)
-                for index in (
-                    getattr(support, "grounding_chunk_indices", None) or []
-                )
+                int(index) for index in (getattr(support, "grounding_chunk_indices", None) or [])
             )
             supports.add((start_index, end_index, chunk_indices))
 
@@ -106,9 +102,7 @@ class GenerationService:
         self._client = client
         self._grounding_enabled = grounding_enabled
         # Detect if the client is a PostHog-wrapped AsyncClient
-        self._is_posthog_client = hasattr(client, "models") and hasattr(
-            client.models, "_ph_client"
-        )
+        self._is_posthog_client = hasattr(client, "models") and hasattr(client.models, "_ph_client")
 
     async def stream_chat_completion(
         self,
@@ -158,7 +152,8 @@ class GenerationService:
                 use_cache = request.cache_name is not None
                 active_cache_name = request.cache_name
                 gemini_contents = await self._build_contents(
-                    request, inline_compilation=not use_cache,
+                    request,
+                    inline_compilation=not use_cache,
                 )
                 set_span_attributes(
                     span,
@@ -196,7 +191,9 @@ class GenerationService:
 
                 async def _open_and_peek(cache_name_to_use: str | None):
                     s = await self._stream_gemini(
-                        request.model, gemini_contents, request.user_id,
+                        request.model,
+                        gemini_contents,
+                        request.user_id,
                         trace_id=request.posthog_trace_id,
                         session_id=request.session_id,
                         cache_name=cache_name_to_use,
@@ -212,9 +209,7 @@ class GenerationService:
                 # idle gaps between a user's requests don't silently expire
                 # the cache. Runs concurrently — no added latency.
                 if use_cache and cache_manager is not None and active_cache_name:
-                    _spawn_background(
-                        cache_manager.refresh_ttl(active_cache_name)
-                    )
+                    _spawn_background(cache_manager.refresh_ttl(active_cache_name))
 
                 try:
                     stream_iter, first_chunk = await _open_and_peek(active_cache_name)
@@ -228,9 +223,9 @@ class GenerationService:
                     # this visible in Axiom regardless of root cause.
                     if use_cache:
                         logger.warning(
-                            "Gemini cached call failed, falling back to full prompt "
-                            "(cache=%s): %s",
-                            active_cache_name, open_err,
+                            "Gemini cached call failed, falling back to full prompt (cache=%s): %s",
+                            active_cache_name,
+                            open_err,
                         )
                         request.cache_fallback_triggered = True
                         request.cache_fallback_error = truncate_error_message(str(open_err))
@@ -247,7 +242,8 @@ class GenerationService:
                         use_cache = False
                         active_cache_name = None
                         gemini_contents = await self._build_contents(
-                            request, inline_compilation=True,
+                            request,
+                            inline_compilation=True,
                         )
                         stream_iter, first_chunk = await _open_and_peek(None)
                     else:
@@ -347,19 +343,11 @@ class GenerationService:
                         ],
                         **request.rag_usage_fields,
                     )
-                    hit_ratio = (
-                        (cached_tokens or 0) / prompt_tokens if prompt_tokens > 0 else 0.0
-                    )
+                    hit_ratio = (cached_tokens or 0) / prompt_tokens if prompt_tokens > 0 else 0.0
                     # Refresh TTL on hit so active users don't hit expiration
                     # mid-session (Gemini caches expire by wallclock, not usage).
-                    if (
-                        cache_hit
-                        and active_cache_name
-                        and cache_manager is not None
-                    ):
-                        _spawn_background(
-                            cache_manager.refresh_ttl(active_cache_name)
-                        )
+                    if cache_hit and active_cache_name and cache_manager is not None:
+                        _spawn_background(cache_manager.refresh_ttl(active_cache_name))
                     set_span_attributes(
                         span,
                         {
@@ -401,9 +389,7 @@ class GenerationService:
                         "grounding.query_count": len(grounding_queries),
                         "grounding.source_count": len(grounding_sources),
                         "grounding.support_count": len(grounding_supports),
-                        "grounding.search_entry_point_present": bool(
-                            grounding_search_entry_point
-                        ),
+                        "grounding.search_entry_point_present": bool(grounding_search_entry_point),
                     },
                 )
                 if grounding_used:
@@ -413,9 +399,7 @@ class GenerationService:
                             "query_count": len(grounding_queries),
                             "source_count": len(grounding_sources),
                             "support_count": len(grounding_supports),
-                            "search_entry_point_present": bool(
-                                grounding_search_entry_point
-                            ),
+                            "search_entry_point_present": bool(grounding_search_entry_point),
                         },
                     )
 
@@ -460,7 +444,9 @@ class GenerationService:
                     {
                         "chat.phase": "finalize",
                         "chat.finish_reason": finish_reason,
-                        "chat.finish_reasons_seen": ",".join(seen_finish_reasons) if seen_finish_reasons else finish_reason,
+                        "chat.finish_reasons_seen": ",".join(seen_finish_reasons)
+                        if seen_finish_reasons
+                        else finish_reason,
                         "chat.stream_chunks_count": chunk_count,
                         "chat.stream_raw_chunks_count": raw_chunk_count,
                         "chat.response_chars": response_chars,
@@ -477,8 +463,12 @@ class GenerationService:
                         {
                             "raw_chunks": raw_chunk_count,
                             "finish_reason": finish_reason,
-                            "prompt_tokens": usage_metadata.prompt_token_count if usage_metadata else 0,
-                            "thoughts_tokens": thoughts_tokens if thoughts_tokens is not None else -1,
+                            "prompt_tokens": usage_metadata.prompt_token_count
+                            if usage_metadata
+                            else 0,
+                            "thoughts_tokens": thoughts_tokens
+                            if thoughts_tokens is not None
+                            else -1,
                             "thoughts_tokens_reported": thoughts_tokens_reported,
                             "empty_response_type": empty_response_type,
                         },
@@ -508,9 +498,7 @@ class GenerationService:
                         "grounding.query_count": len(grounding_queries),
                         "grounding.source_count": len(grounding_sources),
                         "grounding.support_count": len(grounding_supports),
-                        "grounding.search_entry_point_present": bool(
-                            grounding_search_entry_point
-                        ),
+                        "grounding.search_entry_point_present": bool(grounding_search_entry_point),
                         "upstream.status_code": upstream_status_code,
                         "upstream.error_type": type(e).__name__,
                         "upstream.error_message": truncate_error_message(str(e)),
@@ -530,8 +518,12 @@ class GenerationService:
                 yield "data: [DONE]\n\n"
 
     async def _stream_gemini(
-        self, model: str, contents: list, user_id: str | None,
-        trace_id: str = "", session_id: str | None = None,
+        self,
+        model: str,
+        contents: list,
+        user_id: str | None,
+        trace_id: str = "",
+        session_id: str | None = None,
         cache_name: str | None = None,
     ):
         """Route streaming through PostHog wrapper (auto-tracked) or raw client.
@@ -545,13 +537,8 @@ class GenerationService:
         elif self._grounding_enabled:
             # Gemini forbids declaring tools in a request that also uses
             # cached_content. CacheManager stores the same tool in the cache.
-            config_kwargs["tools"] = [
-                types.Tool(google_search=types.GoogleSearch())
-            ]
-        config = (
-            types.GenerateContentConfig(**config_kwargs)
-            if config_kwargs else None
-        )
+            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
         if self._is_posthog_client:
             posthog_props: dict[str, object] = {}
@@ -643,12 +630,8 @@ class GenerationService:
             if item.type == "text":
                 parts.append(types.Part.from_text(text=item.text))
             elif item.type == "image_url":
-                image_bytes, mime_type = await self._download_image(
-                    item.image_url.url
-                )
-                parts.append(
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-                )
+                image_bytes, mime_type = await self._download_image(item.image_url.url)
+                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
         return parts
 
     async def _build_contents(
@@ -697,8 +680,6 @@ class GenerationService:
                 pending_system = None  # Only prepend once
 
             role = "user" if msg.role == "user" else "model"
-            gemini_contents.append(
-                types.Content(role=role, parts=parts)
-            )
+            gemini_contents.append(types.Content(role=role, parts=parts))
 
         return gemini_contents

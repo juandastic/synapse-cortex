@@ -2,7 +2,6 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Discriminator, Field, Tag
 
-
 # =============================================================================
 # Ingest Endpoint Models
 # =============================================================================
@@ -38,9 +37,15 @@ class IngestResponseMetadata(BaseModel):
     """Metadata about the ingestion processing."""
 
     model: str = Field(..., description="Gemini model used for ingestion")
-    processing_time_ms: float | None = Field(default=None, description="Wall-clock time for Graphiti processing")
-    nodes_extracted: int | None = Field(default=None, description="Number of entity nodes extracted")
-    edges_extracted: int | None = Field(default=None, description="Number of entity edges extracted")
+    processing_time_ms: float | None = Field(
+        default=None, description="Wall-clock time for Graphiti processing"
+    )
+    nodes_extracted: int | None = Field(
+        default=None, description="Number of entity nodes extracted"
+    )
+    edges_extracted: int | None = Field(
+        default=None, description="Number of entity edges extracted"
+    )
     episode_id: str | None = Field(default=None, description="UUID of the created episode")
 
 
@@ -61,7 +66,10 @@ class IngestAcceptedResponse(BaseModel):
     status: Literal["processing", "skipped"]
     userKnowledgeCompilation: str | None = None
     compilationMetadata: CompilationMetadataResponse | None = None
-    cacheName: str | None = Field(default=None, description="Gemini CachedContent resource name for the compilation (when caching is active)")
+    cacheName: str | None = Field(
+        default=None,
+        description="Gemini CachedContent resource name for the compilation (when caching is active)",
+    )
 
 
 class GraphStatsResponse(BaseModel):
@@ -69,7 +77,9 @@ class GraphStatsResponse(BaseModel):
 
     entity_count: int = Field(..., description="Total Entity nodes in the graph")
     relationship_count: int = Field(..., description="Total valid RELATES_TO edges")
-    total_chars: int = Field(default=0, description="Sum of all entity summaries + relationship facts in chars")
+    total_chars: int = Field(
+        default=0, description="Sum of all entity summaries + relationship facts in chars"
+    )
 
 
 class IngestStatusResponse(BaseModel):
@@ -81,7 +91,10 @@ class IngestStatusResponse(BaseModel):
     compilationMetadata: CompilationMetadataResponse | None = None
     graphStats: GraphStatsResponse | None = None
     metadata: IngestResponseMetadata | None = None
-    cacheName: str | None = Field(default=None, description="Gemini CachedContent resource name for the compilation (when caching is active)")
+    cacheName: str | None = Field(
+        default=None,
+        description="Gemini CachedContent resource name for the compilation (when caching is active)",
+    )
     error: str | None = None
     code: str | None = None
 
@@ -112,8 +125,7 @@ class ImageUrlContentPart(BaseModel):
 
 
 ContentPart = Annotated[
-    Annotated[TextContentPart, Tag("text")]
-    | Annotated[ImageUrlContentPart, Tag("image_url")],
+    Annotated[TextContentPart, Tag("text")] | Annotated[ImageUrlContentPart, Tag("image_url")],
     Discriminator("type"),
 ]
 
@@ -142,8 +154,8 @@ class ChatCompletionRequest(BaseModel):
     compilation: str | None = Field(
         default=None,
         description="User's compiled knowledge graph text. Sent even when "
-                    "cache_name is set so the server can fall back to inlining "
-                    "if the cache is stale.",
+        "cache_name is set so the server can fall back to inlining "
+        "if the cache is stale.",
     )
     cache_name: str | None = Field(
         default=None,
@@ -153,8 +165,12 @@ class ChatCompletionRequest(BaseModel):
     provider: Literal["vertex", "openrouter"] = "vertex"
     stream: bool = Field(default=True, description="Whether to stream the response")
     compilationMetadata: CompilationMetadataResponse | None = None
-    user_id: str | None = Field(default=None, description="User/group ID for GraphRAG context retrieval")
-    session_id: str | None = Field(default=None, description="Convex session ID for PostHog $ai_session_id grouping")
+    user_id: str | None = Field(
+        default=None, description="User/group ID for GraphRAG context retrieval"
+    )
+    session_id: str | None = Field(
+        default=None, description="Convex session ID for PostHog $ai_session_id grouping"
+    )
     rag_usage_fields: dict[str, object] = Field(default_factory=dict, exclude=True)
     posthog_trace_id: str = Field(default="", exclude=True)
     # Server-side mutable state used by generation. Not part of the public API.
@@ -190,24 +206,54 @@ class UsageData(BaseModel):
     prompt_tokens: int = Field(..., description="Tokens in the input prompt")
     completion_tokens: int = Field(..., description="Tokens in the generated response")
     total_tokens: int = Field(..., description="Total tokens (prompt + completion)")
-    thoughts_tokens: int | None = Field(default=None, description="Thinking tokens (Gemini 2.5+ models)")
+    thoughts_tokens: int | None = Field(
+        default=None, description="Thinking tokens (Gemini 2.5+ models)"
+    )
     cached_tokens: int | None = Field(default=None, description="Tokens served from cache")
-    cost: float | None = Field(default=None, description="Generation cost in USD reported by the provider")
-    rag_enabled: bool | None = Field(default=None, description="Whether GraphRAG context retrieval ran")
-    rag_edges: int | None = Field(default=None, description="Episodic edges injected into the prompt")
+    cost: float | None = Field(
+        default=None, description="Generation cost in USD reported by the provider"
+    )
+    rag_enabled: bool | None = Field(
+        default=None, description="Whether GraphRAG context retrieval ran"
+    )
+    rag_edges: int | None = Field(
+        default=None, description="Episodic edges injected into the prompt"
+    )
     rag_nodes: int | None = Field(default=None, description="Entity nodes injected into the prompt")
     rag_search_ms: float | None = Field(default=None, description="Graphiti search latency in ms")
-    rag_context_chars: int | None = Field(default=None, description="Characters of RAG context injected")
-    cache_enabled: bool | None = Field(default=None, description="Whether explicit Gemini cache was used for this request")
-    cache_hit: bool | None = Field(default=None, description="Whether Gemini reported cached_content_token_count > 0")
-    cache_fallback_triggered: bool | None = Field(default=None, description="Whether a cache error forced fallback to full prompt")
-    grounding_enabled: bool = Field(default=True, description="Whether Google Search was available to Gemini")
-    grounding_used: bool = Field(default=False, description="Whether Gemini actually executed a grounded web search")
-    grounding_query_count: int = Field(default=0, description="Number of unique Google Search queries executed")
-    grounding_source_count: int = Field(default=0, description="Number of unique web sources returned")
-    grounding_support_count: int = Field(default=0, description="Number of answer segments backed by grounding sources")
-    grounding_search_entry_point: str | None = Field(default=None, description="Google-provided HTML/CSS for required Search Suggestions")
-    grounding_sources: list[GroundingSource] = Field(default_factory=list, description="Web sources returned by Gemini")
+    rag_context_chars: int | None = Field(
+        default=None, description="Characters of RAG context injected"
+    )
+    cache_enabled: bool | None = Field(
+        default=None, description="Whether explicit Gemini cache was used for this request"
+    )
+    cache_hit: bool | None = Field(
+        default=None, description="Whether Gemini reported cached_content_token_count > 0"
+    )
+    cache_fallback_triggered: bool | None = Field(
+        default=None, description="Whether a cache error forced fallback to full prompt"
+    )
+    grounding_enabled: bool = Field(
+        default=True, description="Whether Google Search was available to Gemini"
+    )
+    grounding_used: bool = Field(
+        default=False, description="Whether Gemini actually executed a grounded web search"
+    )
+    grounding_query_count: int = Field(
+        default=0, description="Number of unique Google Search queries executed"
+    )
+    grounding_source_count: int = Field(
+        default=0, description="Number of unique web sources returned"
+    )
+    grounding_support_count: int = Field(
+        default=0, description="Number of answer segments backed by grounding sources"
+    )
+    grounding_search_entry_point: str | None = Field(
+        default=None, description="Google-provided HTML/CSS for required Search Suggestions"
+    )
+    grounding_sources: list[GroundingSource] = Field(
+        default_factory=list, description="Web sources returned by Gemini"
+    )
 
 
 class ChatCompletionChunk(BaseModel):
@@ -240,7 +286,10 @@ class HydrateResponse(BaseModel):
     userKnowledgeCompilation: str | None = None
     compilationMetadata: CompilationMetadataResponse | None = None
     graphStats: GraphStatsResponse | None = None
-    cacheName: str | None = Field(default=None, description="Gemini CachedContent resource name for the compilation (when caching is active)")
+    cacheName: str | None = Field(
+        default=None,
+        description="Gemini CachedContent resource name for the compilation (when caching is active)",
+    )
     error: str | None = None
     code: str | None = None
 
@@ -313,7 +362,9 @@ class NotionExportRequest(BaseModel):
     userId: str
     notionToken: str = Field(..., description="Notion internal integration secret")
     pageName: str = Field(..., description="Name of the parent Notion page to export under")
-    language: str = Field(default="English", description="Output language for all generated Notion content")
+    language: str = Field(
+        default="English", description="Output language for all generated Notion content"
+    )
 
 
 class NotionExportAcceptedResponse(BaseModel):
@@ -364,8 +415,12 @@ class NotionCorrectionRequest(BaseModel):
 
     userId: str
     notionToken: str = Field(..., description="Notion internal integration secret")
-    pageName: str = Field(..., description="Name of the parent Notion page containing exported databases")
-    language: str = Field(default="English", description="Language for extracted facts and summaries")
+    pageName: str = Field(
+        ..., description="Name of the parent Notion page containing exported databases"
+    )
+    language: str = Field(
+        default="English", description="Language for extracted facts and summaries"
+    )
 
 
 class NotionCorrectionAcceptedResponse(BaseModel):

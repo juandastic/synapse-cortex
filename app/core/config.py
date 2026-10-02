@@ -81,9 +81,7 @@ def _load_vertex_credentials(settings: Settings):
     try:
         info = json.loads(settings.gcp_credentials_json)
     except json.JSONDecodeError as e:
-        raise ValueError(
-            "GCP_CREDENTIALS_JSON is set but not valid JSON."
-        ) from e
+        raise ValueError("GCP_CREDENTIALS_JSON is set but not valid JSON.") from e
     return service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/cloud-platform"],
@@ -97,7 +95,9 @@ def create_genai_client(settings: Settings) -> genai.Client:
         auth_source = "GCP_CREDENTIALS_JSON" if credentials else "ADC (file or gcloud login)"
         logger.info(
             "GenAI auth: Vertex AI (full) | project=%s location=%s auth=%s | caching=supported",
-            settings.gcp_project, settings.gcp_location, auth_source,
+            settings.gcp_project,
+            settings.gcp_location,
+            auth_source,
         )
         kwargs: dict = {
             "vertexai": True,
@@ -114,9 +114,7 @@ def create_genai_client(settings: Settings) -> genai.Client:
         )
         return genai.Client(vertexai=True, api_key=settings.vertex_api_key)
     if settings.google_api_key:
-        logger.info(
-            "GenAI auth: Google AI Studio (GOOGLE_API_KEY) | caching=supported"
-        )
+        logger.info("GenAI auth: Google AI Studio (GOOGLE_API_KEY) | caching=supported")
         return genai.Client(api_key=settings.google_api_key)
     raise ValueError("Set GCP_PROJECT, VERTEX_API_KEY, or GOOGLE_API_KEY in .env")
 

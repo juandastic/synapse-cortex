@@ -49,9 +49,10 @@ class CacheManager:
         """
         if len(compilation_text) < MIN_CHARS_FOR_CACHE:
             logger.info(
-                "Skipping cache creation for user=%s: compilation too small "
-                "(%d chars, min %d)",
-                user_id, len(compilation_text), MIN_CHARS_FOR_CACHE,
+                "Skipping cache creation for user=%s: compilation too small (%d chars, min %d)",
+                user_id,
+                len(compilation_text),
+                MIN_CHARS_FOR_CACHE,
             )
             return None, "compilation_too_small"
 
@@ -62,25 +63,29 @@ class CacheManager:
                 "ttl": self._ttl,
             }
             if self._grounding_enabled:
-                cache_config["tools"] = [
-                    types.Tool(google_search=types.GoogleSearch())
-                ]
+                cache_config["tools"] = [types.Tool(google_search=types.GoogleSearch())]
             cache = await self._client.aio.caches.create(
                 model=self._model,
                 config=types.CreateCachedContentConfig(**cache_config),
             )
         except Exception as e:
             logger.warning(
-                "Failed to create Gemini cache for user=%s (model=%s, chars=%d, ttl=%s): "
-                "%s: %s",
-                user_id, self._model, len(compilation_text), self._ttl,
-                type(e).__name__, e,
+                "Failed to create Gemini cache for user=%s (model=%s, chars=%d, ttl=%s): %s: %s",
+                user_id,
+                self._model,
+                len(compilation_text),
+                self._ttl,
+                type(e).__name__,
+                e,
             )
             return None, "creation_failed"
 
         logger.info(
             "Created Gemini cache for user=%s: name=%s, chars=%d, ttl=%s",
-            user_id, cache.name, len(compilation_text), self._ttl,
+            user_id,
+            cache.name,
+            len(compilation_text),
+            self._ttl,
         )
         return cache.name, ""
 
@@ -92,7 +97,8 @@ class CacheManager:
         except Exception as e:
             logger.debug(
                 "Failed to delete cache %s (likely already gone): %s",
-                cache_name, e,
+                cache_name,
+                e,
             )
 
     async def refresh_ttl(self, cache_name: str) -> None:
@@ -107,9 +113,13 @@ class CacheManager:
                 config=types.UpdateCachedContentConfig(ttl=self._ttl),
             )
             logger.debug(
-                "Refreshed TTL for cache %s to %s", cache_name, self._ttl,
+                "Refreshed TTL for cache %s to %s",
+                cache_name,
+                self._ttl,
             )
         except Exception as e:
             logger.debug(
-                "Failed to refresh TTL for cache %s: %s", cache_name, e,
+                "Failed to refresh TTL for cache %s: %s",
+                cache_name,
+                e,
             )

@@ -1,6 +1,6 @@
 import unittest
 
-from app.services.cache_manager import CacheManager, MIN_CHARS_FOR_CACHE
+from app.services.cache_manager import MIN_CHARS_FOR_CACHE, CacheManager
 
 
 class _FakeCaches:

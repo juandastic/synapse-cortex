@@ -129,9 +129,17 @@ def capture_span(
         "$ai_span_name": name,
     }
     if input_data is not None:
-        props["$ai_input"] = input_data if isinstance(input_data, list) else [{"role": "user", "content": input_data}]
+        props["$ai_input"] = (
+            input_data
+            if isinstance(input_data, list)
+            else [{"role": "user", "content": input_data}]
+        )
     if output_data is not None:
-        props["$ai_output_choices"] = output_data if isinstance(output_data, list) else [{"role": "assistant", "content": output_data}]
+        props["$ai_output_choices"] = (
+            output_data
+            if isinstance(output_data, list)
+            else [{"role": "assistant", "content": output_data}]
+        )
     if duration_ms is not None:
         props["$ai_latency"] = round(duration_ms, 2)
     if properties:
@@ -158,7 +166,9 @@ def set_posthog_genai_client(client) -> None:
 
 
 @contextmanager
-def posthog_user_context(distinct_id: str, trace_id: str | None = None, session_id: str | None = None):
+def posthog_user_context(
+    distinct_id: str, trace_id: str | None = None, session_id: str | None = None
+):
     """Temporarily set the default distinct_id (and optionally trace_id/session_id) on the
     PostHog GenAI wrapper so that all LLM calls made within the block
     (including Graphiti's internal calls) are associated with the correct user and session.
