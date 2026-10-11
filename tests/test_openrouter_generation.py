@@ -46,11 +46,12 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cachedContents", json.dumps(payload))
         self.assertNotIn("google_search", json.dumps(payload))
 
-    async def test_all_four_models_use_requested_reasoning(self):
+    async def test_active_and_legacy_models_use_requested_reasoning(self):
         high_models = {
             "openai/gpt-6.1-sol",
             "anthropic/claude-sonnet-5.5",
             "qwen/qwen3.8-max-0902",
+            "qwen/qwen3.8-27b",
         }
         self.assertEqual(set(MODEL_CONFIG), high_models | {"moonshotai/kimi-k2.6"})
         for model in MODEL_CONFIG:
@@ -76,6 +77,37 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(payload["reasoning"]["effort"], "high")
         self.assertEqual(payload["messages"][1]["content"], messages[0]["content"])
+
+    async def test_qwen_27b_pins_deepinfra_bf16_and_preserves_images_and_memory(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/photo.png"}},
+                    {"type": "text", "text": "What do you see?"},
+                ],
+            }
+        ]
+        payload = self.service.build_payload(request(model="qwen/qwen3.8-27b", messages=messages))
+        self.assertEqual(payload["model"], "qwen/qwen3.8-27b")
+        self.assertEqual(payload["reasoning"], {"effort": "high", "exclude": True})
+        self.assertEqual(
+            payload["provider"],
+            {
+                "order": ["deepinfra/bf16"],
+                "allow_fallbacks": False,
+                "require_parameters": True,
+            },
+        )
+        self.assertEqual(payload["messages"][1]["content"], messages[0]["content"])
+        self.assertIn("likes hiking", payload["messages"][0]["content"])
+        self.assertIn("lives in Bogota", payload["messages"][0]["content"])
+        for model in MODEL_CONFIG:
+            if model != "qwen/qwen3.8-27b":
+                self.assertEqual(
+                    self.service.build_payload(request(model=model))["provider"],
+                    {"require_parameters": True},
+                )
 
     async def test_images_in_earlier_turn_are_never_silently_dropped(self):
         messages = [
@@ -108,7 +140,7 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
             self.service.build_payload(request())
         self.assertEqual(error.exception.status_code, 503)
 
-    async def _stream(self, events, status=200):
+    async def _stream(self, events, status=200, **overrides):
         seen = []
 
         def handle(upstream):
@@ -117,10 +149,24 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             service = OpenRouterGenerationService("test-secret", client)
-            req = request(user_id="user", session_id="session", posthog_trace_id="trace")
+            req = request(
+                user_id="user", session_id="session", posthog_trace_id="trace", **overrides
+            )
             req.rag_usage_fields = {"rag_enabled": True, "rag_nodes": 2}
             chunks = [chunk async for chunk in service.stream_chat_completion(req)]
         return chunks, seen
+
+    async def test_qwen_27b_provider_failure_surfaces_without_another_model_request(self):
+        chunks, seen = await self._stream(
+            '{"error":{"message":"DeepInfra unavailable"}}',
+            503,
+            model="qwen/qwen3.8-27b",
+        )
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["model"], "qwen/qwen3.8-27b")
+        self.assertFalse(seen[0]["provider"]["allow_fallbacks"])
+        self.assertIn("DeepInfra unavailable", chunks[-1])
+        self.assertNotIn("[DONE]", chunks[-1])
 
     async def test_stream_normalizes_usage_and_never_exposes_reasoning(self):
         chunks, seen = await self._stream(

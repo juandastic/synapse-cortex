@@ -24,6 +24,12 @@ MODEL_CONFIG = {
         "images": True,
     },
     "qwen/qwen3.8-max-0902": {"reasoning": {"effort": "high"}, "images": True},
+    "qwen/qwen3.8-27b": {
+        "reasoning": {"effort": "high"},
+        "images": True,
+        # Keep the local-model evaluation on one known precision and provider.
+        "provider": {"order": ["deepinfra/bf16"], "allow_fallbacks": False},
+    },
     "moonshotai/kimi-k2.6": {"reasoning": {"enabled": True}, "images": True},
 }
 
@@ -80,8 +86,10 @@ class OpenRouterGenerationService:
             "stream": True,
             "stream_options": {"include_usage": True},
             "reasoning": {**MODEL_CONFIG[request.model]["reasoning"], "exclude": True},
-            # Provider failover can retain this model; it must support its reasoning options.
-            "provider": {"require_parameters": True},
+            "provider": {
+                "require_parameters": True,
+                **MODEL_CONFIG[request.model].get("provider", {}),
+            },
             "max_tokens": 16384,
         }
 
