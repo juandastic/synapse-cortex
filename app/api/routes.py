@@ -447,7 +447,12 @@ async def chat_completions(
     # generation uses cached_content; otherwise the compilation is inlined.
     # Stale caches trigger a transparent fallback in the generation service.
     cache_skip_reason = "provider_openrouter" if request.provider == "openrouter" else ""
-    if request.provider == "vertex" and not request.cache_name:
+    if request.provider == "vertex" and request.model == "gemini-4-argon":
+        # A client may still forward a cache created before the Gemini upgrade.
+        # Keep compilation inline instead of sending an incompatible cache ID.
+        request.cache_name = None
+        cache_skip_reason = "implicit_cache_only"
+    elif request.provider == "vertex" and not request.cache_name:
         if not request.compilation:
             cache_skip_reason = "no_compilation_in_request"
         else:

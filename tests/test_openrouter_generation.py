@@ -1,11 +1,13 @@
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 from fastapi import HTTPException
 
 from app.schemas.models import ChatCompletionRequest
+from app.services.generation import GenerationService
 from app.services.openrouter_generation import MODEL_CONFIG, OpenRouterGenerationService
 
 
@@ -325,30 +327,55 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(req.cache_name)
         vertex.stream_chat_completion.assert_not_called()
 
-    async def test_omitted_provider_keeps_vertex_and_cache(self):
+    async def test_omitted_provider_keeps_vertex_and_uses_supported_cache(self):
         from app.api.routes import chat_completions
         from app.services.graph_rag import GraphRagOutcome
 
-        req = ChatCompletionRequest(
-            model="gemini-3.1-pro-preview",
-            messages=[],
-            cache_name="cachedContents/unchanged",
-        )
+        for model in ("gemini-3.1-pro-preview", "gemini-4-argon"):
+            with self.subTest(model=model):
+                req = ChatCompletionRequest(
+                    model=model,
+                    messages=[{"role": "user", "content": "Where do I live?"}],
+                    system_instruction="Be helpful.",
+                    compilation="The user lives in Bogota.",
+                    cache_name="cachedContents/unchanged",
+                )
 
-        class Vertex:
-            async def stream_chat_completion(self, req, cache_manager=None):
-                yield "gemini answer"
+                async def chunks():
+                    yield SimpleNamespace(text="gemini answer", usage_metadata=None, candidates=[])
 
-        alternative = AsyncMock()
-        with patch(
-            "app.api.routes.maybe_run_graph_rag",
-            return_value=GraphRagOutcome(enabled=False, skip_reason="test"),
-        ):
-            response = await chat_completions(
-                req, "secret", Vertex(), alternative, object(), object()
-            )
-            self.assertEqual([chunk async for chunk in response.body_iterator], ["gemini answer"])
-        self.assertEqual(req.provider, "vertex")
-        self.assertEqual(req.cache_name, "cachedContents/unchanged")
-        alternative.validate_request.assert_not_called()
-        alternative.stream_chat_completion.assert_not_called()
+                models = SimpleNamespace(generate_content_stream=AsyncMock(return_value=chunks()))
+                vertex = GenerationService(SimpleNamespace(aio=SimpleNamespace(models=models)))
+                alternative = AsyncMock()
+                cache_manager = AsyncMock()
+                with patch(
+                    "app.api.routes.maybe_run_graph_rag",
+                    return_value=GraphRagOutcome(enabled=False, skip_reason="test"),
+                ):
+                    response = await chat_completions(
+                        req, "secret", vertex, alternative, object(), cache_manager
+                    )
+                    stream = [chunk async for chunk in response.body_iterator]
+                self.assertEqual(stream[-1], "data: [DONE]\n\n")
+                self.assertNotIn('"error"', "".join(stream))
+                self.assertIn("gemini answer", "".join(stream))
+                self.assertEqual(req.provider, "vertex")
+                kwargs = models.generate_content_stream.await_args.kwargs
+                self.assertEqual(kwargs["model"], model)
+                config = kwargs["config"]
+                if model == "gemini-4-argon":
+                    self.assertIsNone(req.cache_name)
+                    self.assertIsNone(config.cached_content)
+                    self.assertIsNotNone(config.tools[0].google_search)
+                    self.assertEqual(
+                        kwargs["contents"][0].parts[0].text,
+                        "Be helpful.\n\nThe user lives in Bogota.",
+                    )
+                    cache_manager.refresh_ttl.assert_not_called()
+                    cache_manager.invalidate_by_name.assert_not_called()
+                else:
+                    self.assertEqual(req.cache_name, "cachedContents/unchanged")
+                    self.assertEqual(config.cached_content, "cachedContents/unchanged")
+                    self.assertIsNone(config.tools)
+                alternative.validate_request.assert_not_called()
+                alternative.stream_chat_completion.assert_not_called()

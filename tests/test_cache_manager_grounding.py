@@ -19,18 +19,22 @@ class _FakeClient:
 
 class CacheManagerGroundingTests(unittest.IsolatedAsyncioTestCase):
     async def test_cache_contains_google_search_when_enabled(self):
-        client = _FakeClient()
-        manager = CacheManager(client, "model", grounding_enabled=True)
-
-        cache_name, reason = await manager.create_compilation_cache(
-            "user",
-            "x" * MIN_CHARS_FOR_CACHE,
-        )
-
-        self.assertEqual(cache_name, "cachedContents/test")
-        self.assertEqual(reason, "")
-        config = client.aio.caches.kwargs["config"]
-        self.assertIsNotNone(config.tools[0].google_search)
+        for model in ("gemini-3.1-pro-preview", "gemini-4-argon"):
+            with self.subTest(model=model):
+                client = _FakeClient()
+                manager = CacheManager(client, model, grounding_enabled=True)
+                cache_name, reason = await manager.create_compilation_cache(
+                    "user", "x" * MIN_CHARS_FOR_CACHE
+                )
+                if model == "gemini-4-argon":
+                    self.assertIsNone(cache_name)
+                    self.assertEqual(reason, "implicit_cache_only")
+                    self.assertIsNone(client.aio.caches.kwargs)
+                else:
+                    self.assertEqual(cache_name, "cachedContents/test")
+                    self.assertEqual(reason, "")
+                    config = client.aio.caches.kwargs["config"]
+                    self.assertIsNotNone(config.tools[0].google_search)
 
     async def test_cache_omits_google_search_when_disabled(self):
         client = _FakeClient()

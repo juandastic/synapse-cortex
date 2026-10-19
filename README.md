@@ -843,6 +843,12 @@ Pipeline steps reported via `currentStep`: `"scanning"` → `"applying"` → `"d
 
 ## Gemini Context Caching
 
+Gemini 4 Argon (`gemini-4-argon`) chat uses `google-genai>=2.30.1`.
+Existing Gemini 3.1 assignments continue to send `gemini-3.1-pro-preview`.
+Argon does not support explicit `cached_content`: Cortex skips its cache creation
+and sends compiled memory inline in the existing prompt format. The explicit-cache
+lifecycle below applies to older models. Requests omitting a model still use Flash.
+
 ### Overview
 
 Every chat turn sends the user's compiled knowledge (~30k tokens) as part of the prompt. Without caching, each request re-bills those tokens at full price. Gemini's **explicit context caching** stores the compilation server-side as a reusable prefix, so only the short per-turn delta (system date, user message, RAG context) is billed at full price — typically **~75% cheaper on repeated tokens** and materially lower TTFT because the cached prefix is pre-tokenized.

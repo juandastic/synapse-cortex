@@ -44,9 +44,12 @@ class CacheManager:
         """Create a Gemini cache for the user's compilation.
 
         Returns (cache_name, skip_reason). cache_name is None when creation
-        was skipped or failed. skip_reason is "compilation_too_small",
-        "creation_failed", or "" on success.
+        was skipped or failed. Argon uses implicit caching; older models
+        may skip because the compilation is too small or creation failed.
         """
+        if self._model == "gemini-4-argon":
+            return None, "implicit_cache_only"
+
         if len(compilation_text) < MIN_CHARS_FOR_CACHE:
             logger.info(
                 "Skipping cache creation for user=%s: compilation too small (%d chars, min %d)",
