@@ -203,6 +203,24 @@ class OpenRouterTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('"error"', chunks[-1])
             self.assertNotIn("[DONE]", chunks[-1])
 
+    async def test_byok_chat_reports_provider_cost_to_client_and_posthog(self):
+        analytics = Mock()
+        events = (
+            'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":'
+            '{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"cost":0,'
+            '"is_byok":true,"cost_details":{"upstream_inference_cost":0.01}}}\n\n'
+            "data: [DONE]\n\n"
+        )
+        with patch("app.core.posthog._posthog_client", analytics):
+            chunks, _ = await self._stream(events)
+        final = json.loads(chunks[-2].removeprefix("data: "))
+        self.assertEqual(final["usage"]["cost"], 0.01)
+        properties = analytics.capture.call_args.kwargs["properties"]
+        self.assertEqual(properties["$ai_total_cost_usd"], 0.01)
+        self.assertEqual(properties["openrouter_cost_usd"], 0)
+        self.assertTrue(properties["is_byok"])
+
     async def test_posthog_records_generation_usage_cost_and_trace_in_seconds(self):
         analytics = Mock()
         events = (

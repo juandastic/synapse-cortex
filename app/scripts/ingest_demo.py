@@ -21,12 +21,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from graphiti_core import Graphiti
-from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
-from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
-from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
 from graphiti_core.nodes import EpisodeType
 
 from app.core.config import create_genai_client, get_settings
+from app.core.graphiti_client import create_graphiti
+from app.core.graphiti_llm import OpenRouterGraphitiClient
+from app.core.posthog import posthog_user_context
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,24 +36,7 @@ SEED_FILE = Path(__file__).parent / "seed_demo.json"
 
 def make_graphiti(settings) -> Graphiti:
     genai_client = create_genai_client(settings)
-    return Graphiti(
-        settings.neo4j_uri,
-        settings.neo4j_user,
-        settings.neo4j_password,
-        llm_client=GeminiClient(
-            config=LLMConfig(model=settings.graphiti_model),
-            client=genai_client,
-        ),
-        embedder=GeminiEmbedder(
-            config=GeminiEmbedderConfig(embedding_model="gemini-embedding-001"),
-            client=genai_client,
-        ),
-        cross_encoder=GeminiRerankerClient(
-            config=LLMConfig(model=settings.graphiti_model),
-            client=genai_client,
-        ),
-        max_coroutines=settings.semaphore_limit,
-    )
+    return create_graphiti(settings, genai_client)
 
 
 def format_messages(messages: list[dict]) -> str:
@@ -93,14 +76,15 @@ async def run(group_id: str) -> None:
             )
             t0 = time.monotonic()
 
-            result = await graphiti.add_episode(
-                name=episode_name,
-                episode_body=episode_body,
-                source=EpisodeType.message,
-                source_description="Chat conversation from Synapse demo seed",
-                group_id=group_id,
-                reference_time=reference_time,
-            )
+            with posthog_user_context(group_id, session_id=session_id):
+                result = await graphiti.add_episode(
+                    name=episode_name,
+                    episode_body=episode_body,
+                    source=EpisodeType.message,
+                    source_description="Chat conversation from Synapse demo seed",
+                    group_id=group_id,
+                    reference_time=reference_time,
+                )
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             total_nodes += len(result.nodes)
@@ -111,6 +95,8 @@ async def run(group_id: str) -> None:
 
     finally:
         await graphiti.close()
+        if isinstance(graphiti.llm_client, OpenRouterGraphitiClient):
+            await graphiti.llm_client.close()
 
     logger.info(
         f"\nDone. {total_nodes} nodes, {total_edges} edges ingested for group_id={group_id!r}"

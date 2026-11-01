@@ -22,6 +22,7 @@ from app.core.observability import (
     mark_span_success,
     set_span_attributes,
 )
+from app.core.posthog import posthog_user_context
 from app.schemas.models import GraphLink, GraphNode, GraphResponse
 
 logger = logging.getLogger(__name__)
@@ -115,14 +116,15 @@ class GraphService:
             try:
                 logger.info(f"Applying memory correction for group {group_id}")
 
-                await self.graphiti.add_episode(
-                    name="user_memory_correction",
-                    episode_body=correction_text,
-                    source=EpisodeType.text,
-                    source_description="User-initiated memory correction via Memory Explorer",
-                    group_id=group_id,
-                    reference_time=datetime.now(),
-                )
+                with posthog_user_context(group_id):
+                    await self.graphiti.add_episode(
+                        name="user_memory_correction",
+                        episode_body=correction_text,
+                        source=EpisodeType.text,
+                        source_description="User-initiated memory correction via Memory Explorer",
+                        group_id=group_id,
+                        reference_time=datetime.now(),
+                    )
 
                 set_span_attributes(
                     span,

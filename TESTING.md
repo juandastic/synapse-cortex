@@ -38,6 +38,7 @@ El `AGENTS.md` de esta instalación remite a estas instrucciones y conserva su c
 | `test_graph_rag.py` | Búsqueda aislada por usuario, exclusión de recuerdos compilados, preservación de persona e historia, clientes legacy, contexto de follow-ups y chat disponible si falla Neo4j |
 | `test_hydration_budget.py` | Grafo completo cuando cabe, selección por prioridad cuando no cabe, metadata de recuerdos realmente incluidos, presupuesto de contenido y grafo vacío |
 | `test_ingestion.py` | No duplicar procesamiento, descartar sesiones insuficientes, conservar detalles del usuario, limitar ruido del asistente y hacer pollable un fallo de Graphiti |
+| `test_graphiti_llm.py` | Roles de modelos, JSON estricto con esquemas Graphiti, costos BYOK, reintentos, resumen de episodios, reranking y aislamiento concurrente de usuario/sesión/traza |
 | Tests previos | Grounding de Gemini, configuración de cache, payloads y errores de OpenRouter |
 
 Las pruebas de hidratación ejecutan el engine completo con un driver que retorna filas controladas. No verifican que Neo4j ejecute correctamente las consultas Cypher. El presupuesto actual cuenta el contenido de recuerdos; los títulos y separadores añaden caracteres al texto final.

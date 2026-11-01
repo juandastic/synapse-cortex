@@ -7,6 +7,8 @@ Manual trace, span, and generation events complement the wrapped GenAI client.
 import logging
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 
 from posthog import Posthog
@@ -156,46 +158,61 @@ def new_trace_id() -> str:
 # GenAI client user context
 # ---------------------------------------------------------------------------
 
-_posthog_genai_client = None
+
+@dataclass(frozen=True)
+class LLMContext:
+    distinct_id: str
+    trace_id: str
+    session_id: str | None = None
 
 
-def set_posthog_genai_client(client) -> None:
-    """Store a reference to the PostHog-wrapped GenAI client for user context switching."""
-    global _posthog_genai_client  # noqa: PLW0603
-    _posthog_genai_client = client
+_llm_context: ContextVar[LLMContext | None] = ContextVar("llm_context", default=None)
+
+
+def get_llm_context() -> LLMContext | None:
+    """Identity inherited by child tasks, isolated from concurrent requests."""
+    return _llm_context.get()
+
+
+class ContextualGeminiModels:
+    """Pass task-local identity into PostHog without changing SDK client defaults."""
+
+    def __init__(self, models):
+        self._models = models
+
+    def __getattr__(self, name):
+        return getattr(self._models, name)
+
+    async def generate_content(self, **kwargs):
+        context = get_llm_context()
+        if context is not None:
+            kwargs.setdefault("posthog_distinct_id", context.distinct_id)
+            kwargs.setdefault("posthog_trace_id", context.trace_id)
+            properties = {}
+            if context.session_id:
+                properties["$ai_session_id"] = context.session_id
+            kwargs["posthog_properties"] = {**properties, **kwargs.get("posthog_properties", {})}
+        return await self._models.generate_content(**kwargs)
 
 
 @contextmanager
 def posthog_user_context(
     distinct_id: str, trace_id: str | None = None, session_id: str | None = None
 ):
-    """Temporarily set the default distinct_id (and optionally trace_id/session_id) on the
-    PostHog GenAI wrapper so that all LLM calls made within the block
-    (including Graphiti's internal calls) are associated with the correct user and session.
-
-    Usage:
-        with posthog_user_context(user_id, trace_id, session_id):
-            await graphiti.add_episode(...)
-    """
-    client = _posthog_genai_client
-    if client is None or not hasattr(client, "models"):
-        yield
-        return
-
-    models = client.models
-    prev_distinct_id = getattr(models, "_default_distinct_id", None)
-    prev_properties = getattr(models, "_default_properties", {})
-
-    models._default_distinct_id = distinct_id
-    extra_props: dict[str, str] = {}
-    if trace_id:
-        extra_props["$ai_trace_id"] = trace_id
-    if session_id:
-        extra_props["$ai_session_id"] = session_id
-    if extra_props:
-        models._default_properties = {**prev_properties, **extra_props}
+    """Associate internal LLM calls with a user, trace and session across async tasks."""
+    previous = get_llm_context()
+    if previous is not None and previous.distinct_id != distinct_id:
+        previous = None
+    token = _llm_context.set(
+        LLMContext(
+            distinct_id=distinct_id,
+            trace_id=trace_id or (previous.trace_id if previous else new_trace_id()),
+            session_id=session_id
+            if session_id is not None
+            else (previous.session_id if previous else None),
+        )
+    )
     try:
         yield
     finally:
-        models._default_distinct_id = prev_distinct_id
-        models._default_properties = prev_properties
+        _llm_context.reset(token)
