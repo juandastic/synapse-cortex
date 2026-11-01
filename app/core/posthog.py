@@ -200,18 +200,7 @@ def posthog_user_context(
     distinct_id: str, trace_id: str | None = None, session_id: str | None = None
 ):
     """Associate internal LLM calls with a user, trace and session across async tasks."""
-    previous = get_llm_context()
-    if previous is not None and previous.distinct_id != distinct_id:
-        previous = None
-    token = _llm_context.set(
-        LLMContext(
-            distinct_id=distinct_id,
-            trace_id=trace_id or (previous.trace_id if previous else new_trace_id()),
-            session_id=session_id
-            if session_id is not None
-            else (previous.session_id if previous else None),
-        )
-    )
+    token = _llm_context.set(LLMContext(distinct_id, trace_id or new_trace_id(), session_id))
     try:
         yield
     finally:

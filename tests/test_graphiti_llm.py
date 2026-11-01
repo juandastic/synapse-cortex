@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import httpx
 import openai
 import pytest
+from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
 from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.llm_client.config import LLMConfig, ModelSize
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
@@ -15,7 +16,7 @@ from tenacity import wait_none
 from app.core import posthog
 from app.core.config import Settings
 from app.core.graphiti_client import create_graphiti
-from app.core.graphiti_llm import GraphitiLLMReranker, OpenRouterGraphitiClient
+from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
 from app.services.ingestion import EpisodeSummary, IngestionService
@@ -298,30 +299,6 @@ async def test_summary_uses_small_graph_client_and_preserves_context(make_client
     assert properties["prompt_name"] == "ingestion.episode_summary"
 
 
-async def test_reranker_orders_passages_without_logprobs(make_client):
-    def handler(request):
-        payload = json.loads(request.content)
-        assert payload["model"] == "openai/small"
-        assert "logprobs" not in payload
-        assert "logit_bias" not in payload
-        return httpx.Response(
-            200,
-            json=completion({"scores": [{"index": 0, "score": 0.1}, {"index": 1, "score": 0.9}]}),
-        )
-
-    reranker = GraphitiLLMReranker(make_client(handler))
-    assert await reranker.rank("city", ["Coffee", "Bogota"]) == [("Bogota", 0.9), ("Coffee", 0.1)]
-    assert await reranker.rank("city", []) == []
-
-
-async def test_reranker_rejects_missing_passages(make_client):
-    client = make_client(
-        lambda _: httpx.Response(200, json=completion({"scores": [{"index": 1, "score": 0.9}]}))
-    )
-    with pytest.raises(ValueError, match="every passage"):
-        await GraphitiLLMReranker(client).rank("city", ["Coffee", "Bogota"])
-
-
 async def test_vertex_fallback_also_keeps_overlapping_contexts_isolated():
     calls = []
 
@@ -345,18 +322,6 @@ async def test_vertex_fallback_also_keeps_overlapping_contexts_isolated():
         owner = call["posthog_distinct_id"]
         assert call["posthog_trace_id"] == f"trace-{owner}"
         assert call["posthog_properties"]["$ai_session_id"] == f"session-{owner}"
-
-
-def test_nested_identity_does_not_inherit_another_users_session_and_restores_on_error():
-    with posthog_user_context("alice", "alice-trace", "alice-session"):
-        with pytest.raises(RuntimeError):
-            with posthog_user_context("bob"):
-                assert get_llm_context().session_id is None
-                assert get_llm_context().trace_id != "alice-trace"
-                raise RuntimeError("failure")
-        assert get_llm_context().distinct_id == "alice"
-        assert get_llm_context().session_id == "alice-session"
-    assert get_llm_context() is None
 
 
 @pytest.mark.parametrize("missing", ["key", "model"])
@@ -400,6 +365,8 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
     graph = create_graphiti(settings, google_client)
     try:
         assert graph.embedder.client is google_client
-        assert isinstance(graph.cross_encoder, GraphitiLLMReranker)
+        assert isinstance(graph.cross_encoder, GeminiRerankerClient)
+        assert graph.cross_encoder.client is google_client
+        assert graph.cross_encoder.config.model is None  # Google's default, never an OpenAI ID.
     finally:
         await graph.llm_client.close()

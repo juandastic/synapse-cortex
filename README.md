@@ -6,8 +6,8 @@ See [TESTING.md](./TESTING.md) for test setup, protected behaviors and remaining
 
 ## Graph processing provider
 
-The API, console and demo ingestion script share `app/core/graphiti_client.py`.
-Copy the graph settings in `.env.example` to use OpenAI through OpenRouter:
+The API configures Graphiti through `app/core/graphiti_client.py`. Copy the graph
+settings in `.env.example` to use OpenAI through OpenRouter:
 
 ```dotenv
 GRAPHITI_PROVIDER=openrouter
@@ -15,31 +15,18 @@ GRAPHITI_MODEL=openai/gpt-6-luna
 GRAPHITI_SMALL_MODEL=openai/gpt-6-luna
 GRAPHITI_REASONING_EFFORT=low
 GRAPHITI_SMALL_REASONING_EFFORT=none
-GRAPHITI_MAX_TOKENS=16384
+GRAPHITI_MAX_TOKENS=16384 # OpenRouter only, including reasoning tokens
 OPEN_ROUTER_API_KEY=<server credential>
 ```
 
 Both roles deliberately use the same model at different reasoning efforts. Graphiti
 selects the role for each prompt; the adapter honors that selection and uses strict
 JSON schemas through the OpenAI SDK. The small role also handles the post-ingestion
-episode summary and the optional relevance reranker. The reranker uses structured
-scores instead of tokenizer-specific logit biases. Chat's GraphRAG retrieval keeps
-its existing RRF fusion, which does not call the LLM reranker.
-
-Model choice was checked against official OpenAI docs and the live OpenRouter model
-catalog on **2026-11-01**. GPT-6 Luna is designed for focused, high-volume workloads
-and supports structured outputs. Standard listed input/output prices per million
-tokens were **$0.10 / $0.50**, compared with GPT-5.4 nano at $0.20 / $1.25,
-GPT-5.4 mini at $0.75 / $4.50, and GPT-6.1 Terra at $1.00 / $5.00. Luna is the
-initial cost/quality choice, not a claim of measured parity on all existing memories.
-Reasoning tokens are billable output, so the small role disables reasoning and the
-main role uses low effort. Both model IDs and efforts can be changed explicitly.
-
-References: [OpenAI Luna model](https://developers.openai.com/api/docs/models/gpt-6-luna),
-[OpenAI pricing](https://developers.openai.com/api/docs/pricing),
-[OpenRouter catalog](https://openrouter.ai/api/v1/models),
-[OpenRouter structured outputs](https://openrouter.ai/docs/guides/features/structured-outputs).
-Prices, account access and endpoint support can change; verify before a later rollout.
+episode summary. Retrieval keeps its RRF fusion, so it never calls an LLM reranker;
+the existing Gemini reranker is retained only to satisfy Graphiti's constructor.
+Luna is the initial cost/quality choice for focused, high-volume workloads. Check
+the [model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna)
+and [OpenRouter catalog](https://openrouter.ai/api/v1/models) before changing models.
 
 **The embedding space remains `gemini-embedding-001` (1024 dimensions)** using the
 existing Google credentials. This preserves vectors already stored in Neo4j.
@@ -55,6 +42,9 @@ generation distinguish OpenRouter's charge from upstream inference cost: for BYO
 `$ai_total_cost_usd` includes the upstream bill plus the router charge; ordinary
 credit requests use the reported total without adding inference twice. The original
 amounts remain in `openrouter_cost_usd` and `upstream_inference_cost_usd`.
+Chat's returned `usage.cost` also uses this total. Newly persisted BYOK chat costs
+therefore include the upstream bill; historical message costs are not rewritten
+and may only reflect the router charge.
 
 Cortex never falls back to a different model or to Vertex silently. Transient transport,
 rate-limit and server failures retry the selected model up to four times, and every

@@ -1,4 +1,4 @@
-"""Shared Graphiti construction for API, console and ingestion scripts."""
+"""Construct the API's Graphiti client with explicit provider selection."""
 
 from graphiti_core import Graphiti
 from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
@@ -7,7 +7,7 @@ from graphiti_core.llm_client.config import LLMConfig
 from graphiti_core.llm_client.gemini_client import GeminiClient
 
 from app.core.config import Settings
-from app.core.graphiti_llm import GraphitiLLMReranker, OpenRouterGraphitiClient
+from app.core.graphiti_llm import OpenRouterGraphitiClient
 
 
 def create_graphiti(settings: Settings, raw_genai_client, tracked_genai_client=None) -> Graphiti:
@@ -28,7 +28,8 @@ def create_graphiti(settings: Settings, raw_genai_client, tracked_genai_client=N
             reasoning_effort=settings.graphiti_reasoning_effort,
             small_reasoning_effort=settings.graphiti_small_reasoning_effort,
         )
-        cross_encoder = GraphitiLLMReranker(llm_client)
+        # RRF searches do not use the reranker; retain Gemini's existing adapter.
+        cross_encoder = GeminiRerankerClient(client=genai_client)
     else:
         llm_client = GeminiClient(config=config, client=genai_client)
         cross_encoder = GeminiRerankerClient(

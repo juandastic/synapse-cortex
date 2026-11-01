@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     graphiti_small_model: str = "gemini-2.5-flash-lite"
     graphiti_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
     graphiti_small_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
-    graphiti_max_tokens: int = 16384
+    graphiti_max_tokens: int = 16384  # OpenRouter output limit, including reasoning tokens.
     # Chat model for /v1/chat/completions. MUST match what the client sends,
     # because Gemini caches are model-bound: a cache created for model A
     # cannot be used with model B (400 INVALID_ARGUMENT).

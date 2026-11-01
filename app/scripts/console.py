@@ -49,9 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from neo4j import AsyncGraphDatabase
 
-from app.core.config import create_genai_client, get_settings
-from app.core.graphiti_client import create_graphiti
-from app.core.graphiti_llm import OpenRouterGraphitiClient
+from app.core.config import get_settings
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
@@ -59,8 +57,28 @@ from app.services.ingestion import IngestionService
 
 
 def _make_graphiti():
+    from graphiti_core import Graphiti
+    from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
+    from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
+    from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
+
     s = get_settings()
-    return create_graphiti(s, create_genai_client(s))
+    return Graphiti(
+        s.neo4j_uri,
+        s.neo4j_user,
+        s.neo4j_password,
+        llm_client=GeminiClient(config=LLMConfig(api_key=s.google_api_key, model=s.graphiti_model)),
+        embedder=GeminiEmbedder(
+            config=GeminiEmbedderConfig(
+                api_key=s.google_api_key,
+                embedding_model="gemini-embedding-001",
+            )
+        ),
+        cross_encoder=GeminiRerankerClient(
+            config=LLMConfig(api_key=s.google_api_key, model=s.graphiti_model)
+        ),
+        max_coroutines=s.semaphore_limit,
+    )
 
 
 async def _setup():
@@ -75,8 +93,8 @@ async def _setup():
     await graphiti.build_indices_and_constraints()
 
     hydration_service = HydrationService(driver)
-    ingestion_service = IngestionService(graphiti, settings.graphiti_model)
-    generation_service = GenerationService(create_genai_client(settings))
+    ingestion_service = IngestionService(graphiti, hydration_service, settings.graphiti_model)
+    generation_service = GenerationService(settings.google_api_key)
     graph_service = GraphService(driver, graphiti)
 
     loop = asyncio.get_running_loop()
@@ -135,8 +153,6 @@ def main():
     finally:
         print("Closing Graphiti and Neo4j...")
         loop.run_until_complete(ns["graphiti"].close())
-        if isinstance(ns["graphiti"].llm_client, OpenRouterGraphitiClient):
-            loop.run_until_complete(ns["graphiti"].llm_client.close())
         loop.run_until_complete(ns["neo4j_driver"].close())
         loop.close()
         print("Done.")
