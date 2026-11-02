@@ -36,7 +36,7 @@ class IngestRequest(BaseModel):
 class IngestResponseMetadata(BaseModel):
     """Metadata about the ingestion processing."""
 
-    model: str = Field(..., description="Gemini model used for ingestion")
+    model: str = Field(..., description="Primary LLM model used for ingestion")
     processing_time_ms: float | None = Field(
         default=None, description="Wall-clock time for Graphiti processing"
     )

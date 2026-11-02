@@ -2,6 +2,7 @@ import json
 import logging
 from functools import lru_cache
 from types import SimpleNamespace
+from typing import Literal
 
 from google import genai
 from google.oauth2 import service_account
@@ -26,11 +27,16 @@ class Settings(BaseSettings):
     gcp_credentials_json: str = ""
     vertex_api_key: str = ""
     google_api_key: str = ""
-    # Chat generation only. Graphiti, embeddings and Vertex are unchanged.
+    # Shared server credential for OpenRouter chat and graph processing.
     open_router_api_key: str = ""
 
-    # Graphiti LLM Configuration (entity extraction, reranking — small prompts)
+    # Explicit provider/roles. Vertex remains available as a configuration rollback.
+    graphiti_provider: Literal["vertex", "openrouter"] = "vertex"
     graphiti_model: str = "gemini-3-flash-preview"
+    graphiti_small_model: str = "gemini-2.5-flash-lite"
+    graphiti_reasoning_effort: Literal["none", "low", "medium", "high"] = "low"
+    graphiti_small_reasoning_effort: Literal["none", "low", "medium", "high"] = "none"
+    graphiti_max_tokens: int = 16384  # OpenRouter output limit, including reasoning tokens.
     # Chat model for /v1/chat/completions. MUST match what the client sends,
     # because Gemini caches are model-bound: a cache created for model A
     # cannot be used with model B (400 INVALID_ARGUMENT).
@@ -149,11 +155,13 @@ def create_posthog_genai_client(settings: Settings, posthog_client):
         posthog_client=posthog_client,
         **kwargs,
     )
-    # Add .aio.models shim so Graphiti (which calls client.aio.models.generate_content)
-    # routes through PostHog's tracked AsyncModels
-    wrapped.aio = SimpleNamespace(models=wrapped.models)
     # The underlying genai.Client for anything that truly needs the raw client
     raw_client = wrapped.models._client
+    from app.core.posthog import ContextualGeminiModels
+
+    wrapped.models = ContextualGeminiModels(wrapped.models)
+    # Graphiti uses .aio.models; generation uses .models directly.
+    wrapped.aio = SimpleNamespace(models=wrapped.models)
     return wrapped, raw_client
 
 

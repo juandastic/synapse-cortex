@@ -4,6 +4,56 @@ See [TESTING.md](./TESTING.md) for test setup, protected behaviors and remaining
 
 **Cognitive backend for the Synapse AI Chat application**. A stateless REST API that processes conversational data into a dynamic knowledge graph, enabling personalized long-term memory and intelligent context retrieval for AI assistants.
 
+## Graph processing provider
+
+The API configures Graphiti through `app/core/graphiti_client.py`. Copy the graph
+settings in `.env.example` to use OpenAI through OpenRouter:
+
+```dotenv
+GRAPHITI_PROVIDER=openrouter
+GRAPHITI_MODEL=openai/gpt-6-luna
+GRAPHITI_SMALL_MODEL=openai/gpt-6-luna
+GRAPHITI_REASONING_EFFORT=low
+GRAPHITI_SMALL_REASONING_EFFORT=none
+GRAPHITI_MAX_TOKENS=16384 # OpenRouter only, including reasoning tokens
+OPEN_ROUTER_API_KEY=<server credential>
+```
+
+Both roles deliberately use the same model at different reasoning efforts. Graphiti
+selects the role for each prompt; the adapter honors that selection and uses strict
+JSON schemas through the OpenAI SDK. The small role also handles the post-ingestion
+episode summary. Retrieval keeps its RRF fusion, so it never calls an LLM reranker;
+the existing Gemini reranker is retained only to satisfy Graphiti's constructor.
+Luna is the initial cost/quality choice for focused, high-volume workloads. Check
+the [model documentation](https://developers.openai.com/api/docs/models/gpt-6-luna)
+and [OpenRouter catalog](https://openrouter.ai/api/v1/models) before changing models.
+
+**The embedding space remains `gemini-embedding-001` (1024 dimensions)** using the
+existing Google credentials. This preserves vectors already stored in Neo4j.
+Google also continues serving existing Gemini chat, context caches and Notion
+analysis. This change does not require re-ingesting existing memories.
+
+PostHog records each OpenRouter attempt as one `$ai_generation`, including the
+actual model, prompt name, role, tokens, reasoning/cache usage, latency in seconds,
+errors and reported cost. Task-local identity links internal calls and the episode
+summary to the ingestion's user, trace and session, including parallel ingestions.
+Existing ingestion `$ai_trace`/`$ai_span` events are retained. Both chat and graph
+generation distinguish OpenRouter's charge from upstream inference cost: for BYOK,
+`$ai_total_cost_usd` includes the upstream bill plus the router charge; ordinary
+credit requests use the reported total without adding inference twice. The original
+amounts remain in `openrouter_cost_usd` and `upstream_inference_cost_usd`.
+Chat's returned `usage.cost` also uses this total. Newly persisted BYOK chat costs
+therefore include the upstream bill; historical message costs are not rewritten
+and may only reflect the router charge.
+
+Cortex never falls back to a different model or to Vertex silently. Transient transport,
+rate-limit and server failures retry the selected model up to four times, and every
+attempt is observable. PostHog failures do not fail graph generation. To roll back,
+set `GRAPHITI_PROVIDER=vertex`, `GRAPHITI_MODEL=gemini-3-flash-preview` and
+`GRAPHITI_SMALL_MODEL=gemini-2.5-flash-lite`, then restart the API. Existing installs
+without new settings keep the Vertex defaults. Docker Compose forwards all graph
+settings from `.env`.
+
 ---
 
 ## The Story Behind the Project

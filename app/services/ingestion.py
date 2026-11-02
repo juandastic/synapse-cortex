@@ -12,10 +12,12 @@ import logging
 import time
 from datetime import datetime
 
-from google.genai import types
 from graphiti_core import Graphiti
+from graphiti_core.llm_client.config import ModelSize
 from graphiti_core.nodes import EpisodeType
+from graphiti_core.prompts.models import Message
 from opentelemetry import trace
+from pydantic import BaseModel
 
 from app.core.observability import (
     classify_error,
@@ -42,26 +44,26 @@ MIN_TOTAL_CHARS = 5
 # assistant responses are verbose and add noise to entity extraction.
 ASSISTANT_TRUNCATE_LIMIT = 300
 
-# Model used for episode summarization (fast/cheap, one-time cost per ingestion)
-SUMMARY_MODEL = "gemini-2.5-flash-lite"
-
 SUMMARY_PROMPT = (
     "Summarize this conversation in 2-3 sentences in the same language as the conversation. "
     "Focus on: key topics discussed, decisions made, and any important insights. "
-    "Be factual and concise. Output ONLY the summary, no preamble or labels.\n\n"
+    "Be factual and concise. Return the summary in the requested JSON schema."
 )
 
 # Cap input to the summarization call to control cost
 SUMMARY_INPUT_LIMIT = 8000
 
 
+class EpisodeSummary(BaseModel):
+    summary: str
+
+
 class IngestionService:
     """Service for processing chat sessions into the knowledge graph."""
 
-    def __init__(self, graphiti: Graphiti, model: str, genai_client=None):
+    def __init__(self, graphiti: Graphiti, model: str):
         self.graphiti = graphiti
         self.model = model
-        self._genai_client = genai_client
 
     async def accept_session(self, request: IngestRequest) -> IngestAcceptedResponse:
         """
@@ -231,22 +233,19 @@ class IngestionService:
         truncated assistant messages), capped at SUMMARY_INPUT_LIMIT chars.
         Returns None on failure.
         """
-        if self._genai_client is None:
-            return None
-
         text = episode_content[:SUMMARY_INPUT_LIMIT]
         try:
-            response = await self._genai_client.aio.models.generate_content(
-                model=SUMMARY_MODEL,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=SUMMARY_PROMPT + text)],
-                    )
+            response = await self.graphiti.llm_client.generate_response(
+                [
+                    Message(role="system", content=SUMMARY_PROMPT),
+                    Message(role="user", content=text),
                 ],
+                response_model=EpisodeSummary,
+                model_size=ModelSize.small,
+                max_tokens=1024,
+                prompt_name="ingestion.episode_summary",
             )
-            # response.text is None when the model returns no content (e.g. safety filter)
-            return response.text.strip() if response.text else None
+            return response["summary"].strip() or None
         except Exception as e:
             logger.warning(f"Episode summarization failed: {e}")
             return None

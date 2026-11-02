@@ -9,15 +9,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from graphiti_core import Graphiti
-from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
-from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
-from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
 from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
 from app.core.config import create_genai_client, create_posthog_genai_client, get_settings
-from app.core.posthog import get_posthog, init_posthog, set_posthog_genai_client, shutdown_posthog
+from app.core.graphiti_client import create_graphiti
+from app.core.graphiti_llm import OpenRouterGraphitiClient
+from app.core.posthog import get_posthog, init_posthog, shutdown_posthog
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
@@ -64,50 +62,30 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to connect to Neo4j: {e}")
         raise
 
-    # Create GenAI clients.
-    # If PostHog is configured, use its wrapper for auto-tracking LLM calls;
-    # extract the underlying raw client for Graphiti (which needs genai.Client).
-    # If PostHog is not configured, fall back to a plain genai.Client.
+    # Google still serves chat, context caches and the existing embedding space.
+    # The tracked client also supports Graphiti's optional Vertex rollback.
     posthog_client = get_posthog()
     if posthog_client:
         posthog_genai_client, raw_genai_client = create_posthog_genai_client(
             settings,
             posthog_client,
         )
-        # Use the PostHog-wrapped client everywhere — it has .aio.models shim
-        # so Graphiti's internal calls (client.aio.models.generate_content)
-        # are automatically tracked in PostHog.
+        # The wrapper accepts task-local identity through its .aio.models shim.
         graphiti_client = posthog_genai_client
         generation_client = posthog_genai_client
-        set_posthog_genai_client(posthog_genai_client)
         logger.info("Using PostHog-wrapped GenAI client for LLM analytics")
     else:
         raw_genai_client = create_genai_client(settings)
         graphiti_client = raw_genai_client
         generation_client = raw_genai_client
 
-    # Initialize Graphiti — uses PostHog-wrapped client when available,
-    # so all internal LLM calls (entity extraction, reranking, etc.) are tracked.
-    graphiti = Graphiti(
-        settings.neo4j_uri,
-        settings.neo4j_user,
-        settings.neo4j_password,
-        llm_client=GeminiClient(
-            config=LLMConfig(model=settings.graphiti_model),
-            client=graphiti_client,
-        ),
-        embedder=GeminiEmbedder(
-            config=GeminiEmbedderConfig(embedding_model="gemini-embedding-001"),
-            client=raw_genai_client,
-        ),
-        cross_encoder=GeminiRerankerClient(
-            config=LLMConfig(model=settings.graphiti_model),
-            client=graphiti_client,
-        ),
-        max_coroutines=settings.semaphore_limit,
-    )
+    graphiti = create_graphiti(settings, raw_genai_client, graphiti_client)
     logger.info(
-        f"Graphiti initialized with model={settings.graphiti_model}, max_coroutines={settings.semaphore_limit}"
+        "Graphiti initialized: provider=%s model=%s small_model=%s max_coroutines=%s",
+        settings.graphiti_provider,
+        settings.graphiti_model,
+        settings.graphiti_small_model,
+        settings.semaphore_limit,
     )
 
     # Build indices and constraints (safe to call multiple times, only creates if missing)
@@ -128,7 +106,7 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
-    ingestion_service = IngestionService(graphiti, settings.graphiti_model, generation_client)
+    ingestion_service = IngestionService(graphiti, settings.graphiti_model)
     generation_service = GenerationService(
         generation_client,
         grounding_enabled=settings.grounding_enabled,
@@ -166,6 +144,8 @@ async def lifespan(app: FastAPI):
     await app.state.openrouter_generation_service.close()
     await neo4j_driver.close()
     await graphiti.close()
+    if isinstance(graphiti.llm_client, OpenRouterGraphitiClient):
+        await graphiti.llm_client.close()
     shutdown_posthog()
     shutdown_telemetry()
     logger.info("Synapse Cortex shutdown complete")

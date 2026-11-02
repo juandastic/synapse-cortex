@@ -10,6 +10,7 @@ import httpx
 from fastapi import HTTPException
 from opentelemetry import trace
 
+from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import capture_generation
 from app.schemas.models import ChatCompletionRequest
 
@@ -180,7 +181,7 @@ class OpenRouterGenerationService:
                     "cached_tokens": (usage.get("prompt_tokens_details") or {}).get(
                         "cached_tokens"
                     ),
-                    "cost": usage.get("cost"),
+                    "cost": openrouter_usage_properties(usage).get("$ai_total_cost_usd"),
                     "cache_enabled": False,
                     "grounding_enabled": False,
                     "grounding_used": False,
@@ -239,14 +240,7 @@ class OpenRouterGenerationService:
     ):
         properties = {
             "$ai_latency": time.monotonic() - started_at,
-            "$ai_total_cost_usd": usage.get("cost"),
-            "$ai_total_tokens": usage.get("total_tokens"),
-            "$ai_reasoning_tokens": (usage.get("completion_tokens_details") or {}).get(
-                "reasoning_tokens"
-            ),
-            "$ai_cache_read_input_tokens": (usage.get("prompt_tokens_details") or {}).get(
-                "cached_tokens"
-            ),
+            **openrouter_usage_properties(usage),
             "requested_model": request.model,
             "finish_reason": finish_reason,
             **request.rag_usage_fields,

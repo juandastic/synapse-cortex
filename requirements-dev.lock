@@ -243,7 +243,9 @@ numpy==2.5.3
     #   graphiti-core
     #   numexpr
 openai==3.24.0
-    # via graphiti-core
+    # via
+    #   -r requirements.txt
+    #   graphiti-core
 opentelemetry-api==1.45.0
     # via
     #   -r requirements.txt
