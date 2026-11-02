@@ -8,6 +8,10 @@ class CompilationMetadata:
     included_node_ids: list[str] = field(default_factory=list)
     included_edge_ids: list[str] = field(default_factory=list)
     included_episode_ids: list[str] = field(default_factory=list)
+    compilation_revision: str | None = None
+    compiler_model: str | None = None
+    source_node_ids: list[str] = field(default_factory=list)
+    source_edge_ids: list[str] = field(default_factory=list)
 
 
 @dataclass

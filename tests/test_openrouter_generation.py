@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.schemas.models import ChatCompletionRequest
 from app.services.generation import GenerationService
+from app.services.hydration import HydrationService
 from app.services.openrouter_generation import MODEL_CONFIG, OpenRouterGenerationService
 
 
@@ -338,7 +339,9 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
         req = request()
         with patch("app.api.routes.maybe_run_graph_rag", side_effect=rag):
-            response = await chat_completions(req, "secret", vertex, generator, object(), object())
+            response = await chat_completions(
+                req, "secret", vertex, generator, object(), object(), HydrationService(None)
+            )
             self.assertEqual([chunk async for chunk in response.body_iterator], ["answer"])
         self.assertEqual(calls, ["validate", "rag", "openrouter"])
         self.assertIn("Additional retrieved memory", generator.assert_request.system_instruction)
@@ -371,7 +374,13 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
                     return_value=GraphRagOutcome(enabled=False, skip_reason="test"),
                 ):
                     response = await chat_completions(
-                        req, "secret", vertex, alternative, object(), cache_manager
+                        req,
+                        "secret",
+                        vertex,
+                        alternative,
+                        object(),
+                        cache_manager,
+                        HydrationService(None),
                     )
                     stream = [chunk async for chunk in response.body_iterator]
                 self.assertEqual(stream[-1], "data: [DONE]\n\n")

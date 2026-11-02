@@ -21,10 +21,13 @@ from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
+from app.services.hydration_compiler import HydrationCompiler, HydrationLLM
+from app.services.hydration_store import HydrationStore
 from app.services.ingestion import IngestionService
 from app.services.notion_correction import NotionCorrectionService
 from app.services.notion_export import NotionExportService
 from app.services.openrouter_generation import OpenRouterGenerationService
+from app.services.persisted_hydration import PersistedHydration
 
 # Configure logging
 logging.basicConfig(
@@ -106,12 +109,23 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
-    ingestion_service = IngestionService(graphiti, settings.graphiti_model)
+    persisted = None
+    if settings.persisted_hydration_enabled:
+        persisted = PersistedHydration(
+            HydrationStore(neo4j_driver),
+            HydrationCompiler(HydrationLLM(generation_client, settings.hydration_model)),
+            hydration_service,
+        )
+        await persisted.start()
+        hydration_service.persisted = persisted
+    ingestion_service = IngestionService(
+        graphiti, settings.graphiti_model, persisted.changed if persisted else None
+    )
     generation_service = GenerationService(
         generation_client,
         grounding_enabled=settings.grounding_enabled,
     )
-    graph_service = GraphService(neo4j_driver, graphiti)
+    graph_service = GraphService(neo4j_driver, graphiti, persisted.changed if persisted else None)
     notion_export_service = NotionExportService(
         hydration_service=hydration_service,
         settings=settings,
@@ -119,6 +133,7 @@ async def lifespan(app: FastAPI):
     notion_correction_service = NotionCorrectionService(
         graphiti=graphiti,
         settings=settings,
+        hydration_changed=persisted.changed if persisted else None,
     )
 
     # Store in app state for dependency injection
@@ -142,6 +157,8 @@ async def lifespan(app: FastAPI):
     # Cleanup on shutdown
     logger.info("Shutting down Synapse Cortex...")
     await app.state.openrouter_generation_service.close()
+    if persisted:
+        await persisted.close()
     await neo4j_driver.close()
     await graphiti.close()
     if isinstance(graphiti.llm_client, OpenRouterGraphitiClient):

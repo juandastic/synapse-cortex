@@ -1829,6 +1829,70 @@ To replace the demo content entirely:
 2. Re-run Steps 1–2 with a new temporary group_id
 3. Commit the updated `scripts/seed_data/demo_graph.json`
 
+## Persisted structured hydration
+
+`PERSISTED_HYDRATION_ENABLED=true` enables background compilation for existing
+`version: "v2"` consumers. There is no Convex or Durable Object dependency and
+no client migration. Set it to `false` and restart to restore the original v2
+behavior. Explicit v1 requests always retain the original implementation.
+
+```text
+episode + graph extraction -> episode summary attempted -> durable user job
+  -> extract attributed source quotes -> select by topic -> validate -> publish
+/hydrate -> published snapshot, or original v2 while the first build is pending
+```
+
+The compiler uses `HYDRATION_MODEL=gemini-3-flash-preview` with the existing
+Google credentials, independently of the graph extraction model/provider. It
+selects literal user/document spans rather than generating an unsupported
+personal narrative. Original quotes retain third-party subjects, episode reference times
+and attribution. Interpretations remain attributed statements, not verified
+medical facts. Explicit do-not-store blocks and technical tests are omitted
+from this compilation; this does not retroactively delete their graph records.
+
+Neo4j stores the current payload and leased work state in namespaced
+`hydration_*` properties on `SynapseUserCore`. `SynapseHydrationSource` caches
+verified extraction per source window and source hash. Audit revisions contain
+claim IDs/hashes, not old copies of personal text. None of these records are
+Graphiti `Entity` or `Episodic` nodes. The original graph remains unchanged.
+
+One worker per API process leases a user, with two bounded extraction calls in
+parallel. Pending jobs survive restarts; expired leases can be reclaimed.
+Failures retain retryable work and v2 remains available. Initial construction
+can take minutes for large archives. New versions reuse unchanged extraction;
+they reselect the resident context so recent goals can replace older ones.
+The API also checks for publication on chat requests, so existing sessions can
+use it before Convex refreshes its stored copy. No LLM compilation runs in the
+hydrate or chat request path. Provider-cache renewal uses the stored text.
+
+Coverage is conservative. `included_edge_ids` contains only complete verbatim
+facts whose temporal dates are also represented. `included_node_ids` is empty
+for partially summarized entities. `source_node_ids`, `source_edge_ids` and
+`included_episode_ids` retain source lineage; they do not authorize excluding
+all details of an entity/episode. `is_partial` remains true. GraphRAG overfetches
+before deduplication and injects at most ten new edges and ten new nodes.
+
+Source stamps, selected episode hashes and covered-fact hashes invalidate stale
+payloads. Graph Explorer and Notion corrections also invalidate explicitly.
+Revoked published text/cache IDs are replaced on the next chat request. The
+existing Convex cache is still a transport copy, not the compilation authority.
+
+Run `make verify` for offline contracts and failure recovery. The explicit
+integration script permits only loopback Neo4j and uses real providers:
+
+```bash
+python -m app.scripts.verify_hydration --env-file /path/to/local.env
+# Synthetic ingestion -> compilation -> hydrate -> restart read -> SSE chat.
+# Synthetic data is removed in finally.
+python -m app.scripts.verify_hydration --env-file /path/to/local.env --user USER_ID
+# Compiles an existing local user; only derived hydration nodes are written.
+```
+
+This extractive release establishes persistence, lifecycle and traceable
+selection. It is not a demonstrated lossless summary or a clinical validation
+of the archive. Bump `EXTRACTION_VERSION` when extraction rules change and
+`COMPILER_VERSION` when selection/rendering/publication semantics change.
+
 ## Alternative chat generation with OpenRouter
 
 Set `OPEN_ROUTER_API_KEY` to enable the four explicit non-Google chat models configured in

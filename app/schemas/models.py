@@ -57,6 +57,10 @@ class CompilationMetadataResponse(BaseModel):
     included_node_ids: list[str]
     included_edge_ids: list[str]
     included_episode_ids: list[str] = Field(default_factory=list)
+    compilation_revision: str | None = None
+    compiler_model: str | None = None
+    source_node_ids: list[str] = Field(default_factory=list)
+    source_edge_ids: list[str] = Field(default_factory=list)
 
 
 class IngestAcceptedResponse(BaseModel):

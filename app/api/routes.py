@@ -92,6 +92,10 @@ def _to_metadata_response(
         included_node_ids=meta.included_node_ids,
         included_edge_ids=meta.included_edge_ids,
         included_episode_ids=meta.included_episode_ids,
+        compilation_revision=meta.compilation_revision,
+        compiler_model=meta.compiler_model,
+        source_node_ids=meta.source_node_ids,
+        source_edge_ids=meta.source_edge_ids,
     )
 
 
@@ -404,6 +408,7 @@ async def chat_completions(
     openrouter_generation_service: OpenRouterGenerationServiceDep,
     graphiti: GraphitiDep,
     cache_manager: CacheManagerDep,
+    hydration_service: HydrationServiceDep,
 ):
     """
     OpenAI-compatible chat completions endpoint with streaming.
@@ -422,7 +427,12 @@ async def chat_completions(
         openrouter_generation_service.validate_request(request)
         # This is request-local. The stored Gemini cache stays available for later turns.
         request.cache_name = None
-
+    refreshed = await hydration_service.refresh_chat_compilation(request)
+    if refreshed and request.compilation and request.provider == "vertex":
+        request.cache_name, _ = await cache_manager.create_compilation_cache(
+            request.user_id,
+            request.compilation,
+        )
     span = trace.get_current_span()
     system_prompt_chars = 0
     has_images = False

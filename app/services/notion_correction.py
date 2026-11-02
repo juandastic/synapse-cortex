@@ -240,10 +240,12 @@ class NotionCorrectionService:
         self,
         graphiti: Graphiti,
         settings: Settings,
+        hydration_changed=None,
         max_concurrent_imports: int = 3,
     ):
         self._graphiti = graphiti
         self._settings = settings
+        self._hydration_changed = hydration_changed
         self._semaphore = asyncio.Semaphore(max_concurrent_imports)
 
     # ------------------------------------------------------------------
@@ -698,6 +700,8 @@ class NotionCorrectionService:
                     item.page_id,
                 )
                 with posthog_user_context(group_id):
+                    if self._hydration_changed:
+                        await self._hydration_changed(group_id, invalidate=True)
                     result = await self._graphiti.add_episode(
                         name="notion_correction",
                         episode_body=episode_body,
@@ -709,6 +713,8 @@ class NotionCorrectionService:
                         reference_time=datetime.now(),
                         custom_extraction_instructions=extraction_instructions,
                     )
+                    if self._hydration_changed:
+                        await self._hydration_changed(group_id, invalidate=True)
                 set_span_attributes(
                     span,
                     {

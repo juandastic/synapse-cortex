@@ -87,12 +87,58 @@ class HydrationService:
     def __init__(self, driver: AsyncDriver, min_degree: int = DEFAULT_MIN_DEGREE):
         self.driver = driver
         self.min_degree = min_degree
+        self.persisted = None
+
+    async def refresh_chat_compilation(self, request) -> bool:
+        """Pick up a newly published revision without waiting for a new session.
+
+        Existing v1/v2-only clients and disabled deployments retain their contract.
+        A revoked published snapshot must never survive through the client's cache.
+        """
+        if self.persisted is None or not request.user_id:
+            return False
+        old_revision = getattr(request.compilationMetadata, "compilation_revision", None)
+        try:
+            published = await self.persisted.read(request.user_id, strict=True)
+        except Exception:
+            # An unavailable graph is not evidence that the client's snapshot
+            # was revoked. Preserve the existing cached-memory availability.
+            return False
+        if published is None and old_revision:
+            try:
+                published = await self.build_user_knowledge(request.user_id, version="v2")
+            except Exception:
+                request.compilation = None
+                request.compilationMetadata = None
+                request.cache_name = None
+                return True
+        if published is None:
+            return False
+        from dataclasses import asdict
+
+        from app.schemas.models import CompilationMetadataResponse
+
+        unchanged = request.compilation == published.compilation_text
+        request.compilationMetadata = (
+            CompilationMetadataResponse(**asdict(published.metadata))
+            if published.metadata is not None
+            else None
+        )
+        if unchanged:
+            return False
+        request.compilation = published.compilation_text
+        request.cache_name = None
+        return True
 
     async def build_user_knowledge(
         self,
         user_id: str,
         version: Literal["v1", "v2"] = "v1",
     ) -> HydrationResult:
+        if version == "v2" and self.persisted is not None:
+            published = await self.persisted.read(user_id)
+            if published is not None:
+                return published
         graph_stats = await self._fetch_graph_stats(user_id)
 
         if version == "v2":
