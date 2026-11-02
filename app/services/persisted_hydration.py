@@ -52,7 +52,7 @@ class PersistedHydration:
             await self.store.read(user)
         self._wake.set()
 
-    async def read(self, user, *, strict=False):
+    async def read(self, user):
         try:
             result = await self.store.read(user)
             if result is None:
@@ -60,8 +60,6 @@ class PersistedHydration:
                 self._wake.set()
             return result
         except Exception:
-            if strict:
-                raise
             logger.exception("Persisted hydration unavailable; using legacy hydration")
             return None
 

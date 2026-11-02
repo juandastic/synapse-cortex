@@ -184,6 +184,17 @@ async def test_cold_read_enqueues_work_and_provider_failure_does_not_block_http(
     assert await service.read("owner") is None
 
 
+async def test_old_compilation_format_enqueues_rebuild_without_parsing_retired_payload():
+    store = HydrationStore(None)
+    store.current = AsyncMock(return_value={"compiler": "older-format", "result": {}})
+    store.request = AsyncMock()
+    store.stamp = AsyncMock()
+    service = PersistedHydration(store, None, None)
+    assert await service.read("owner") is None
+    store.request.assert_awaited_once_with("owner")
+    store.stamp.assert_not_awaited()
+
+
 async def test_completed_worker_reuses_unchanged_source_extraction_and_checks_revision():
     ep = dict(
         uuid="ep", source="message", valid_at="2026-10-30", content="User: " + claim()["quote"]
@@ -376,18 +387,6 @@ async def test_real_hydrate_router_returns_published_text_coverage_and_legacy_co
     }
     assert body["graphStats"]["entity_count"] == 1
     assert body["cacheName"] is None
-
-
-def test_prepared_snapshot_with_retired_tracking_metadata_remains_readable():
-    previous = asdict(published())
-    previous["metadata"].update(
-        source_node_ids=["person"],
-        source_edge_ids=["fact"],
-        citation_sources={"f1": {"edge_ids": ["fact"]}},
-        compiler_model="old-model",
-    )
-    restored = HydrationStore.result({"result": previous})
-    assert asdict(restored) == asdict(published())
 
 
 async def test_ingest_notifies_after_summary_and_before_completed_job():

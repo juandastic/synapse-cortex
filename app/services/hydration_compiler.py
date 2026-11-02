@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 
-COMPILER_VERSION = "fact-backed-4"
+COMPILER_VERSION = "fact-backed-5"
 SELECTION_CACHE_VERSION = "fact-backed-3"
 logger = logging.getLogger(__name__)
 EXTRACTION_VERSION = "extractive-1"

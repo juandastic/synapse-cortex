@@ -2,7 +2,7 @@
 
 import json
 import logging
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from uuid import uuid4
 
 from app.services.hydration_compiler import COMPILER_VERSION, WorkPending, digest
@@ -41,7 +41,6 @@ RETURN r.uuid AS uuid, r.fact AS fact, r.episodes AS episodes,
 DELETE_HYDRATION_QUERY = """
 MATCH (n {user_id:$user})
 WHERE n:SynapseUserCore OR n:SynapseHydrationSource OR n:SynapseHydrationSelection
-   OR n:SynapseHydrationRevision
 DETACH DELETE n
 """
 
@@ -106,19 +105,10 @@ class HydrationStore:
     @staticmethod
     def result(payload):
         data = payload["result"]
-        # Older prepared snapshots can contain metadata that no longer has a
-        # runtime consumer. Drop it without rebuilding memory or breaking reads.
-        metadata_fields = {field.name for field in fields(CompilationMetadata)}
         return HydrationResult(
             **{
                 **data,
-                "metadata": CompilationMetadata(
-                    **{
-                        key: value
-                        for key, value in data["metadata"].items()
-                        if key in metadata_fields
-                    }
-                ),
+                "metadata": CompilationMetadata(**data["metadata"]),
                 "graph_stats": GraphStats(**data["graph_stats"]),
             }
         )
