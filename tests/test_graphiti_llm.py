@@ -491,7 +491,7 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
 
 
 async def test_hydration_limits_provider_call_duration(monkeypatch):
-    monkeypatch.setattr("app.services.hydration_compiler.LLM_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("app.services.hydration_result.LLM_TIMEOUT_SECONDS", 0.01)
 
     async def stalled(*args, **kwargs):
         await asyncio.Event().wait()

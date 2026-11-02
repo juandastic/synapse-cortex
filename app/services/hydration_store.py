@@ -264,9 +264,7 @@ class HydrationStore:
         edges = await self.rows(EDGES_QUERY, user=user)
         return episodes, edges
 
-    async def publish(
-        self, job, stamp, result, selected, episodes, edges, *, seen_hashes, fact_sections
-    ):
+    async def publish(self, job, stamp, result, episodes, edges, *, seen_hashes, fact_sections):
         revision = str(uuid4())
         result.metadata.compilation_revision = revision
         source_ids = set(result.metadata.included_episode_ids)
@@ -277,14 +275,6 @@ class HydrationStore:
                 "stamp": stamp,
                 "result": asdict(result),
                 "source_hashes": hashes,
-                "selected": [
-                    {
-                        k: v
-                        for k, v in fact.items()
-                        if k not in {"excluded_context", "classification_retry"}
-                    }
-                    for fact in selected
-                ],
                 "seen_hashes": seen_hashes,
                 "fact_sections": fact_sections,
                 "edge_hashes": {
@@ -322,7 +312,7 @@ class HydrationStore:
             try:
                 await self.rows(
                     """MATCH (r:SynapseHydrationSelection {user_id:$user})
-                    WITH r ORDER BY r.created_at DESC SKIP 1000 DELETE r""",
+                    WITH r ORDER BY coalesce(r.used_at,r.created_at) DESC SKIP 1000 DELETE r""",
                     user=job["user"],
                 )
             except Exception:
@@ -342,10 +332,13 @@ class GroupCache:
         self.store, self.job = store, job
         self.calls = 0
 
-    async def load(self, fingerprint, *, calls=1):
+    async def load(self, fingerprint, *, calls=1, retry_epoch=None):
         rows = await self.store.rows(
-            """MATCH (n:SynapseHydrationSelection {key:$key}) RETURN n.sections AS sections""",
+            """MATCH (n:SynapseHydrationSelection {key:$key})
+            WHERE n.retry_epoch IS NULL OR n.retry_epoch=$retry_epoch
+            SET n.used_at=datetime() RETURN n.sections AS sections""",
             key=digest([self.job["user"], fingerprint]),
+            retry_epoch=retry_epoch,
         )
         if rows and rows[0].get("sections") is not None:
             return json.loads(rows[0]["sections"])
@@ -354,17 +347,19 @@ class GroupCache:
         self.calls += calls
         return None
 
-    async def save(self, fingerprint, sections):
+    async def save(self, fingerprint, sections, *, retry_epoch=None):
         rows = await self.store.rows(
             """MATCH (n:SynapseUserCore {user_id:$user,hydration_owner:$token})
             SET n.hydration_lock=coalesce(n.hydration_lock,0)+1
             WITH n WHERE n.hydration_generation=$generation AND n.hydration_lease_until>timestamp()
             MERGE (s:SynapseHydrationSelection {key:$key})
-            SET s.user_id=$user,s.sections=$sections,s.created_at=datetime()
+            SET s.user_id=$user,s.sections=$sections,s.created_at=datetime(),s.used_at=datetime(),
+                s.retry_epoch=$retry_epoch
             RETURN s.key AS key""",
             **self.job,
             key=digest([self.job["user"], fingerprint]),
             sections=json.dumps(sections),
+            retry_epoch=retry_epoch,
         )
         if not rows:
             raise RuntimeError("Hydration grouping writer lost its lease or revision")

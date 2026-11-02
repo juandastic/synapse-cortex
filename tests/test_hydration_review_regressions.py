@@ -224,7 +224,7 @@ async def test_selector_reuses_cached_decisions_and_yields_before_third_uncached
         await cache.load("another-uncached-batch")
 
 
-@pytest.mark.parametrize("previous_state", ["unchanged", "selected_removed", "old_version"])
+@pytest.mark.parametrize("previous_state", ["unchanged", "classification_removed", "old_version"])
 async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previous_state):
     ep = dict(
         uuid="a", source="message", valid_at="2026-11-01", content="User: Mi gato se llama Leo."
@@ -236,12 +236,10 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
     candidates = compiler.fact_candidates([evidence()], facts)
     previous = dict(
         compiler=COMPILER_VERSION,
-        selected=[{**candidates[0], "fact_section": "Mi gato Leo"}],
         seen_hashes={c["id"]: digest(c) for c in candidates},
         fact_sections={c["id"]: "Mi gato Leo" for c in candidates},
     )
-    if previous_state == "selected_removed":
-        previous["selected"] = [{"id": "retired"}]
+    if previous_state == "classification_removed":
         previous["fact_sections"] = {}
     elif previous_state == "old_version":
         previous["compiler"] = "older-compiler"
@@ -256,12 +254,12 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
         store, compiler, SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1)))
     )
     assert await service.build(dict(user="owner", token="lease", generation=1))
-    selected = store.publish.await_args.args[3]
-    assert [item["id"] for item in selected] == ["cat"]
+    published = store.publish.await_args.args[2]
+    assert published.metadata.included_edge_ids == ["cat"]
     assert store.publish.await_args.kwargs["seen_hashes"] == previous["seen_hashes"]
     assert compiler.llm.generate_response.await_count == (0 if previous_state == "unchanged" else 1)
     if previous_state == "unchanged":
-        assert selected[0]["fact_section"] == "Mi gato Leo"
+        assert "Mi gato Leo" in published.compilation_text
 
 
 async def test_unsupported_archive_becomes_terminal_until_memory_changes():

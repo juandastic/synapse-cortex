@@ -1,11 +1,12 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.services.hydration_compiler import HydrationCompiler, WorkPending
-from app.services.hydration_consolidation import consolidate, source_facts
-from app.services.hydration_result import GraphStats
+from app.services.hydration_consolidation import consolidate
+from app.services.hydration_result import GraphStats, source_facts
 from app.services.hydration_store import GroupCache
 
 
@@ -99,8 +100,8 @@ async def test_suspicious_proposals_keep_original_details_and_coverage(issue):
             "reviews": [
                 {
                     "record_index": 0,
-                    "complete": False,
-                    "supported": False,
+                    "complete": issue != "unsupported",
+                    "supported": issue != "unsupported",
                     "reason": "missing or unsupported content",
                 }
             ]
@@ -162,17 +163,13 @@ async def test_editing_any_source_changes_cache_key_and_rechecks_the_rewrite():
 
 async def test_budget_falls_back_to_whole_original_facts_if_merged_record_does_not_fit():
     original = facts()
-    merged = await consolidate(
-        original,
-        client(
-            text="Leidy siente que aprender biología, aeronáutica y física solo tiene sentido si realiza un pregrado formal. "
-            + "Información contextual adicional. " * 20
-        ),
-    )
+    merged = await consolidate(original, client())
+    assert len(merged) == 1
     edges = [dict(uuid=f["id"], fact=f["quote"], valid_at=None, invalid_at=None) for f in original]
-    compiler = HydrationCompiler(None, char_budget=850)
+    full, _ = HydrationCompiler(None).render(merged, edges, GraphStats(4, 3))
+    compiler = HydrationCompiler(None, char_budget=len(full.compilation_text) - 5)
     result, retained = compiler.render(merged, edges, GraphStats(4, 3))
-    assert retained and len(result.compilation_text) <= 850
+    assert retained and len(result.compilation_text) <= compiler.char_budget
     assert all(f["quote"] in result.compilation_text for f in retained)
     assert set(result.metadata.included_edge_ids) == {f["fact_id"] for f in retained}
 
@@ -246,3 +243,103 @@ async def test_real_ambiguous_locations_and_phase_descriptions_stay_literal_even
     llm = client()
     assert await consolidate(original, llm) == original
     llm.generate_response.assert_not_awaited()
+
+
+async def test_lowercase_enumeration_item_cannot_disappear_behind_covered_id():
+    original = [
+        {**f, "quote": f"Al usuario le gusta tomar {drink} por la mañana antes del trabajo."}
+        for f, drink in zip(facts(), ["café", "té"], strict=False)
+    ]
+    llm = client(text=original[0]["quote"])
+    llm.generate_response.side_effect = [
+        {"records": [{"text": original[0]["quote"], "ids": ["F1", "F2"]}]},
+        {"reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]},
+    ]
+    records = await consolidate(original, llm)
+    assert records == original
+    edges = [dict(uuid=f["id"], fact=f["quote"]) for f in original]
+    result, _ = HydrationCompiler(None).render(records, edges, GraphStats(3, 2))
+    assert "café" in result.compilation_text and "té" in result.compilation_text
+    assert set(result.metadata.included_edge_ids) == {"f1", "f2"}
+    assert llm.generate_response.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "texts",
+    [
+        [
+            "Una mariposa estaba en el nochero de Leidy el 17 de noviembre de 2025.",
+            "Una mariposa estaba en la almohada de Leidy el 17 de noviembre de 2025.",
+        ],
+        [
+            "Leidy dice que vive en Bogotá con su pareja desde hace varios años.",
+            "Leidy dice que vive en Medellín con su pareja desde hace varios años.",
+        ],
+        [
+            "Leidy dice que toma 50 mg de sertralina por la mañana desde hace varios meses.",
+            "Leidy dice que toma 100 mg de sertralina por la mañana desde hace varios meses.",
+        ],
+        [
+            "Leidy dice que le gusta mucho el café por la mañana.",
+            "Leidy dice que no le gusta el café por la mañana.",
+        ],
+        [
+            "Leidy acompañó el proceso de identificación neurodivergente de Emmanuel.",
+            "Leidy acompañó el proceso de identificación neurodivergente de Wil.",
+        ],
+    ],
+)
+async def test_incompatible_locations_doses_negation_and_proper_name_slots_stay_literal(texts):
+    original = [{**f, "quote": text} for f, text in zip(facts(), texts, strict=False)]
+    llm = client()
+    assert await consolidate(original, llm) == original
+    llm.generate_response.assert_not_awaited()
+
+
+async def test_provider_failure_is_cached_for_job_but_retried_after_new_ingestion():
+    saved = {}
+
+    async def load(key, *, retry_epoch, **kwargs):
+        record = saved.get(key)
+        return record[0] if record and record[1] in (None, retry_epoch) else None
+
+    async def save(key, value, *, retry_epoch=None):
+        saved[key] = (value, retry_epoch)
+
+    cache = SimpleNamespace(load=load, save=save)
+    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=TimeoutError()))
+    assert await consolidate(facts(), llm, cache, retry_epoch=1) == facts()
+    assert await consolidate(facts(), llm, cache, retry_epoch=1) == facts()
+    assert llm.generate_response.await_count == 1
+    llm = client()
+    assert len(await consolidate(facts(), llm, cache, retry_epoch=2)) == 1
+    assert llm.generate_response.await_count == 2
+    assert len(await consolidate(facts(), llm, cache, retry_epoch=3)) == 1
+    assert llm.generate_response.await_count == 2
+
+
+async def test_consolidation_timeout_keeps_literal_memory(monkeypatch):
+    monkeypatch.setattr("app.services.hydration_result.LLM_TIMEOUT_SECONDS", 0.001)
+
+    async def delayed(*args, **kwargs):
+        await asyncio.sleep(10)
+
+    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=delayed))
+    assert await consolidate(facts(), llm) == facts()
+    assert llm.generate_response.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Leidy siente que aprender biología y aeronáutica solo tiene sentido si realiza un pregrado formal.",
+        "Leidy siente que aprender biología, aeronáutica y física solo tiene sentido si realiza un pregrado formal. Actualmente está matriculada.",
+        "Leidy realiza un pregrado formal y siente que aprender biología, aeronáutica y física solo tiene sentido si.",
+    ],
+)
+async def test_model_approval_cannot_override_missing_items_invented_words_or_changed_predicate(
+    text,
+):
+    llm = client(text=text)
+    assert await consolidate(facts(), llm) == facts()
+    assert llm.generate_response.await_count == 1

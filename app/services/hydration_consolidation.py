@@ -6,13 +6,15 @@ import json
 import logging
 import re
 import unicodedata
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from graphiti_core.prompts.models import Message
 from pydantic import BaseModel
 
+from app.services import hydration_result
+
 logger = logging.getLogger(__name__)
-CONSOLIDATION_VERSION = "consolidation-2"
+CONSOLIDATION_VERSION = "consolidation-3"
 SOURCE_FIELDS = (
     "id",
     "fact_id",
@@ -40,6 +42,8 @@ No mezcles opiniones o consejos del asistente con vivencias ni los presentes com
 clínicos comprobados. No inventes nada para conectar registros. No repitas un ID.
 Propón solo enumeraciones paralelas con el mismo predicado. No fusiones ubicaciones
 alternativas ni explicaciones con estructuras distintas, aunque traten del mismo tema.
+Conserva literalmente todas las palabras del predicado y de cada elemento enumerado.
+Solo puedes añadir conectores 'y' o 'e' y puntuación, sin introducir palabras nuevas.
 Las fechas de procedencia y vigencia ya las añade el código; no las cambies.
 Devuelve records vacío ante cualquier duda."""
 VERIFY_PROMPT = """Audita la fidelidad de propuestas de consolidación de memoria.
@@ -75,10 +79,6 @@ class Verification(BaseModel):
     reviews: list[Review]
 
 
-def source_facts(record: dict) -> list[dict]:
-    return record.get("source_facts") or [record]
-
-
 def _fold(text):
     return "".join(
         c for c in unicodedata.normalize("NFKD", text.lower()) if not unicodedata.combining(c)
@@ -93,29 +93,21 @@ def _details_preserved(text, facts):
 
     if not numbers(original) <= numbers(text):
         return False
-    # This is an additional veto, not a substitute for semantic verification.
-    generic = {
-        "el",
-        "la",
-        "los",
-        "las",
-        "un",
-        "una",
-        "the",
-        "a",
-        "an",
-        "user",
-        "usuario",
-        "assistant",
-        "asistente",
-        "she",
-        "he",
-        "they",
-        "her",
-        "his",
-    }
-    names = {_fold(word) for word in re.findall(r"\b[A-ZÁÉÍÓÚÑ][\w-]*", original)} - generic
-    return names <= set(re.findall(r"[\w-]+", _fold(text)))
+    # Lowercase details matter too: covering an ID must not hide its omitted
+    # food, subject, drug or qualifier from RAG. Broader paraphrases stay literal.
+    parts = _parallel_parts(facts)
+    if parts is None:
+        return False
+    head, slots, tail = parts
+    actual = re.findall(r"[\w-]+", _fold(text))
+    if actual[: len(head)] != head or (tail and actual[-len(tail) :] != tail):
+        return False
+    middle = actual[len(head) : len(actual) - len(tail) if tail else None]
+    expected = Counter(word for slot in slots for word in slot)
+    observed = Counter(word for word in middle if word in expected or word not in {"y", "e"})
+    return observed == expected and all(
+        any(middle[i : i + len(slot)] == slot for i in range(len(middle))) for slot in slots
+    )
 
 
 def _redundant(facts):
@@ -123,12 +115,17 @@ def _redundant(facts):
 
 
 def _parallel(facts):
+    return _parallel_parts(facts) is not None
+
+
+def _parallel_parts(facts):
     """Require one short enumeration slot inside an otherwise identical formulation.
 
     The model alone approved incompatible locations and descriptions in the real
     archive. This veto deliberately leaves broader paraphrases literal.
     """
-    tokens = [re.findall(r"[\w-]+", _fold(f["quote"])) for f in facts]
+    raw = [re.findall(r"[\w-]+", f["quote"]) for f in facts]
+    tokens = [[_fold(word) for word in words] for words in raw]
     shortest = min(map(len, tokens))
     prefix = 0
     while prefix < shortest and len({words[prefix] for words in tokens}) == 1:
@@ -138,11 +135,25 @@ def _parallel(facts):
         suffix += 1
     slots = [words[prefix : len(words) - suffix if suffix else None] for words in tokens]
     spatial = {"en", "sobre", "debajo", "junto", "detras", "delante", "lado", "entre"}
-    return (
+    prefix_words = tokens[0][:prefix]
+    while prefix_words and prefix_words[-1] in {"el", "la", "los", "las", "un", "una", "the", "a"}:
+        prefix_words = prefix_words[:-1]
+    if prefix_words and prefix_words[-1] in spatial:
+        return None
+    negation = {"no", "nunca", "jamas", "tampoco", "dejo", "ya", "not", "never", "stopped"}
+    raw_slots = [words[prefix : len(words) - suffix if suffix else None] for words in raw]
+    eligible = (
         prefix >= 3
         and prefix + suffix >= 6
-        and all(0 < len(slot) <= 4 and not spatial.intersection(slot) for slot in slots)
+        and all(
+            0 < len(slot) <= 4 and not (spatial | negation).intersection(slot) for slot in slots
+        )
+        and all(
+            not any(word[0].isupper() or any(c.isdigit() for c in word) for word in slot)
+            for slot in raw_slots
+        )
     )
+    return (tokens[0][:prefix], slots, tokens[0][-suffix:] if suffix else []) if eligible else None
 
 
 async def _generate(llm, prompt, data, schema, name):
@@ -156,7 +167,7 @@ async def _generate(llm, prompt, data, schema, name):
             max_tokens=8192,
             prompt_name=name,
         ),
-        timeout=90,
+        timeout=hydration_result.LLM_TIMEOUT_SECONDS,
     )
     return schema.model_validate(response)
 
@@ -209,14 +220,17 @@ async def _verified_proposal(facts, llm):
     ]
 
 
-async def _consolidate_batch(facts, llm, cache):
+async def _consolidate_batch(facts, llm, cache, retry_epoch):
     snapshots = [{key: f[key] for key in SOURCE_FIELDS if key in f} for f in facts]
     key = hashlib.sha256(
         json.dumps([CONSOLIDATION_VERSION, snapshots], sort_keys=True, default=str).encode()
     ).hexdigest()
     # Reserve both calls before proposing: a slice must never end with an unverified rewrite.
-    accepted = await cache.load(key, calls=2) if cache is not None else None
+    accepted = (
+        await cache.load(key, calls=2, retry_epoch=retry_epoch) if cache is not None else None
+    )
     if accepted is None:
+        failed = False
         try:
             accepted = await _verified_proposal(snapshots, llm)
         except Exception:
@@ -224,8 +238,12 @@ async def _consolidate_batch(facts, llm, cache):
                 "Hydration consolidation unavailable; preserving literal facts", exc_info=True
             )
             accepted = []
+            failed = True
         if cache is not None:
-            await cache.save(key, accepted)
+            if failed and retry_epoch is not None:
+                await cache.save(key, accepted, retry_epoch=retry_epoch)
+            else:
+                await cache.save(key, accepted)
     logger.info(
         "Hydration consolidation: %d source facts, %d verified merged records",
         len(facts),
@@ -249,7 +267,7 @@ async def _consolidate_batch(facts, llm, cache):
     ]
 
 
-async def consolidate(grouped: list[dict], llm, cache=None) -> list[dict]:
+async def consolidate(grouped: list[dict], llm, cache=None, *, retry_epoch=None) -> list[dict]:
     cohorts = defaultdict(list)
     for fact in grouped:
         if fact.get("source_uuid") and not any(
@@ -274,7 +292,7 @@ async def consolidate(grouped: list[dict], llm, cache=None) -> list[dict]:
         for start in range(0, len(ordered), 12):
             batch = ordered[start : start + 12]
             if len(batch) > 1 and sum(len(f["quote"]) for f in batch) <= 6000 and _redundant(batch):
-                result = await _consolidate_batch(batch, llm, cache)
+                result = await _consolidate_batch(batch, llm, cache, retry_epoch)
                 for fact in batch:
                     replacements[fact["id"]] = None
                 replacements.update({f["id"]: f for f in result})

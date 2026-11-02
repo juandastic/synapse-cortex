@@ -507,17 +507,6 @@ async def test_automatically_excluded_only_archive_can_publish_empty_instead_of_
 
 
 async def test_published_payload_does_not_copy_excluded_message_text():
-    selected = dict(
-        id="fact",
-        fact_id="fact",
-        quote="Julia es mi prima.",
-        date="2026-11-02",
-        episode_ids=["ep"],
-        excluded_context=[
-            {"id": "private", "text": "No guardes este mensaje: private test contents"}
-        ],
-        classification_retry=True,
-    )
     result = HydrationResult(
         "Julia es mi prima.",
         CompilationMetadata(True, 5, included_edge_ids=["fact"], included_episode_ids=["ep"]),
@@ -529,7 +518,6 @@ async def test_published_payload_does_not_copy_excluded_message_text():
         {"user": "owner", "token": "lease", "generation": 1},
         "stamp",
         result,
-        [selected],
         [dict(uuid="ep", content="No guardes este mensaje: private test contents")],
         [dict(uuid="fact", fact="Julia es mi prima.")],
         seen_hashes={},
@@ -537,3 +525,4 @@ async def test_published_payload_does_not_copy_excluded_message_text():
     )
     payload = store.rows.await_args_list[0].kwargs["payload"]
     assert "private test contents" not in payload and "excluded_context" not in payload
+    assert '"selected"' not in payload

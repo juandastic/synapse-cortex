@@ -87,13 +87,14 @@ class PersistedHydration:
             )
             cache = self.store.group_cache(job)
             grouped, seen_hashes = await self._group_incremental(job, candidates, cache=cache)
-            records = await consolidate(grouped, self.compiler.llm, cache)
-        result, retained = await self._render_guarded(user, sources, candidates, records, edges)
+            records = await consolidate(
+                grouped, self.compiler.llm, cache, retry_epoch=job["generation"]
+            )
+        result, _ = await self._render_guarded(user, sources, candidates, records, edges)
         return await self._publish_if_unchanged(
             job,
             stamp,
             result,
-            retained,
             episodes,
             edges,
             seen_hashes,
@@ -164,7 +165,7 @@ class PersistedHydration:
         return result, retained
 
     async def _publish_if_unchanged(
-        self, job, stamp, result, retained, episodes, edges, seen_hashes, fact_sections
+        self, job, stamp, result, episodes, edges, seen_hashes, fact_sections
     ) -> bool:
         if await self.store.stamp(job["user"]) != stamp:
             # Keep this job dirty. An old builder must not revoke a newer
@@ -191,7 +192,6 @@ class PersistedHydration:
             job,
             stamp,
             result,
-            retained,
             episodes,
             edges,
             seen_hashes=seen_hashes,
