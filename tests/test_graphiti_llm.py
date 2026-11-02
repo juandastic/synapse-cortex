@@ -19,7 +19,8 @@ from app.core.graphiti_client import create_graphiti
 from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
-from app.services.hydration_compiler import HydrationCompiler, Source
+from app.services.hydration_compiler import HydrationCompiler
+from app.services.hydration_consolidation import consolidate
 from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
 
@@ -376,28 +377,14 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
 
 async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make_client, analytics):
     requests = []
-    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+    episode = dict(uuid="ep", valid_at="2026-11-01")
 
     def handler(request):
         payload = json.loads(request.content)
         requests.append(payload)
         schema = payload["response_format"]["json_schema"]
-        if schema["name"] == "Extraction":
-            answer = {
-                "spans": [
-                    {
-                        "source_id": source.id,
-                        "quote": source.text,
-                        "section": "Personas y vínculos",
-                        "kind": "relato",
-                    }
-                ]
-            }
-        else:
-            answer = {
-                "ids": ["fact"],
-                "sections": [{"id": "fact", "section": "Personas y vínculos"}],
-            }
+        assert schema["name"] == "Grouping"
+        answer = {"groups": [{"title": "Personas y vínculos", "ids": ["fact"]}]}
         return httpx.Response(
             200,
             json=completion(
@@ -414,14 +401,13 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
 
     hydration_client = make_client(handler, model=HYDRATION_MODEL)
     compiler = HydrationCompiler(hydration_client)
-    facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+    facts = [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
-        quotes = await compiler.extract([source])
-        selected = await compiler.select(compiler.fact_candidates(quotes, facts))
+        selected = await compiler.group(compiler.fact_candidates([episode], facts))
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Martina es mi sobrina" in result.compilation_text
     assert result.metadata.included_edge_ids == ["fact"]
-    assert len(requests) == 2
+    assert len(requests) == 1
 
     def assert_strict_objects(schema):
         if isinstance(schema, dict):
@@ -439,7 +425,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert request["reasoning"]["effort"] == "low"
         assert request["response_format"]["json_schema"]["strict"] is True
         assert_strict_objects(request["response_format"]["json_schema"]["schema"])
-    assert analytics.capture.call_count == 2
+    assert analytics.capture.call_count == 1
     names = set()
     for call in analytics.capture.call_args_list:
         assert call.kwargs["distinct_id"] == "owner"
@@ -449,16 +435,72 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert props["$ai_provider"] == "openrouter"
         assert props["$ai_total_cost_usd"] == 0.001
         names.add(props["prompt_name"])
-    assert names == {"hydration.extract", "hydration.select"}
+    assert names == {"hydration.group"}
+
+
+async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and_tracking(
+    make_client, analytics
+):
+    requests = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        name = payload["response_format"]["json_schema"]["name"]
+        answer = (
+            {
+                "records": [
+                    {
+                        "text": "Leidy quiere estudiar física y química con un pregrado formal.",
+                        "ids": ["F1", "F2"],
+                    }
+                ]
+            }
+            if name == "Proposal"
+            else {
+                "reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]
+            }
+        )
+        return httpx.Response(200, json=completion(answer, model=payload["model"]))
+
+    facts = [
+        dict(
+            id=str(i),
+            fact_id=str(i),
+            quote=f"Leidy quiere estudiar {field} con un pregrado formal.",
+            source_uuid="leidy",
+            date="2026-11-02",
+            fact_section="Estudios",
+        )
+        for i, field in enumerate(["física", "química"])
+    ]
+    with posthog_user_context("owner", "trace", "session"):
+        result = await consolidate(facts, make_client(handler, model=HYDRATION_MODEL))
+    assert len(result) == 1
+    assert len(requests) == 2
+    assert all(
+        r["model"] == HYDRATION_MODEL and r["response_format"]["json_schema"]["strict"]
+        for r in requests
+    )
+    properties = [call.kwargs["properties"] for call in analytics.capture.call_args_list]
+    assert {p["prompt_name"] for p in properties} == {"hydration.consolidate", "hydration.verify"}
+    assert all(
+        p["$ai_trace_id"] == "trace" and p["$ai_session_id"] == "session" for p in properties
+    )
+    assert all(call.kwargs["distinct_id"] == "owner" for call in analytics.capture.call_args_list)
 
 
 async def test_hydration_limits_provider_call_duration(monkeypatch):
-    monkeypatch.setattr("app.services.hydration_compiler.LLM_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("app.services.hydration_result.LLM_TIMEOUT_SECONDS", 0.01)
 
     async def stalled(*args, **kwargs):
         await asyncio.Event().wait()
 
     compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
-    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+    episode = dict(uuid="ep", valid_at="2026-11-01")
     with pytest.raises(TimeoutError):
-        await compiler.extract([source])
+        await compiler.group(
+            compiler.fact_candidates(
+                [episode], [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
+            )
+        )

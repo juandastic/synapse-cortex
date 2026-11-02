@@ -1,5 +1,11 @@
 from dataclasses import dataclass, field
 
+LLM_TIMEOUT_SECONDS = 90
+
+
+def source_facts(record: dict) -> list[dict]:
+    return record.get("source_facts") or [record]
+
 
 @dataclass
 class CompilationMetadata:
