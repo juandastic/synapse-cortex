@@ -114,10 +114,6 @@ def _to_metadata_response(
         included_edge_ids=meta.included_edge_ids,
         included_episode_ids=meta.included_episode_ids,
         compilation_revision=meta.compilation_revision,
-        compiler_model=meta.compiler_model,
-        source_node_ids=meta.source_node_ids,
-        source_edge_ids=meta.source_edge_ids,
-        citation_sources=meta.citation_sources,
     )
 
 

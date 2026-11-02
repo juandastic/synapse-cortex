@@ -82,7 +82,6 @@ def test_invalidated_fact_never_returns_from_old_quote_even_with_other_active_ed
     assert "Tengo diabetes" not in result.compilation_text
     assert "La prima tiene diabetes" in result.compilation_text
     assert set(result.metadata.included_edge_ids) == {"cat", "corrected"}
-    assert "retired" not in result.metadata.source_edge_ids
 
 
 @pytest.mark.parametrize("name", ["user_memory_correction", "notion_correction"])
@@ -114,7 +113,7 @@ def test_coverage_handles_graph_paraphrases_and_preserves_temporal_fields():
     assert "2020-01-01T00:00:00Z" in result.compilation_text
     assert result.metadata.included_edge_ids == ["lives"]
     assert result.metadata.included_node_ids == []
-    assert result.metadata.citation_sources["f1"]["edge_ids"] == ["lives"]
+    assert result.metadata.included_episode_ids == ["a"]
 
 
 async def test_additive_read_serves_previous_snapshot_without_revoking_or_advancing_generation():

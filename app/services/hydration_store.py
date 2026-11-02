@@ -2,7 +2,7 @@
 
 import json
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from uuid import uuid4
 
 from app.services.hydration_compiler import COMPILER_VERSION, WorkPending, digest
@@ -35,8 +35,7 @@ EDGES_QUERY = """
 MATCH (a:Entity {group_id:$user})-[r:RELATES_TO {group_id:$user}]->(b:Entity {group_id:$user})
 WHERE r.expired_at IS NULL AND (r.invalid_at IS NULL OR r.invalid_at > datetime())
 RETURN r.uuid AS uuid, r.fact AS fact, r.episodes AS episodes,
-       toString(r.valid_at) AS valid_at,toString(r.invalid_at) AS invalid_at,
-       a.uuid AS source_uuid, b.uuid AS target_uuid
+       toString(r.valid_at) AS valid_at,toString(r.invalid_at) AS invalid_at
 """
 
 DELETE_HYDRATION_QUERY = """
@@ -107,10 +106,19 @@ class HydrationStore:
     @staticmethod
     def result(payload):
         data = payload["result"]
+        # Older prepared snapshots can contain metadata that no longer has a
+        # runtime consumer. Drop it without rebuilding memory or breaking reads.
+        metadata_fields = {field.name for field in fields(CompilationMetadata)}
         return HydrationResult(
             **{
                 **data,
-                "metadata": CompilationMetadata(**data["metadata"]),
+                "metadata": CompilationMetadata(
+                    **{
+                        key: value
+                        for key, value in data["metadata"].items()
+                        if key in metadata_fields
+                    }
+                ),
                 "graph_stats": GraphStats(**data["graph_stats"]),
             }
         )
@@ -345,7 +353,6 @@ class HydrationStore:
             },
             ensure_ascii=False,
         )
-        # Audit revisions keep references and hashes, never historic copies of quotations.
         rows = await self.rows(
             """
         MATCH (n:SynapseUserCore {user_id:$user,hydration_owner:$token})
@@ -358,8 +365,6 @@ class HydrationStore:
             n.hydration_attempts=0,n.hydration_failed_generation=null,
             n.hydration_cache_name=$cache_name,n.hydration_cache_model=$cache_model,
             n.hydration_cache_expires_at=$cache_expires
-        CREATE (:SynapseHydrationRevision {user_id:$user, revision:$revision,
-            source_stamp:$stamp,claim_ids:$claim_ids,content_hash:$hash,created_at:datetime()})
         RETURN n.hydration_revision AS revision
         """,
             **job,
@@ -367,20 +372,12 @@ class HydrationStore:
             payload=payload,
             result=json.dumps(asdict(result), ensure_ascii=False),
             compiler=COMPILER_VERSION,
-            stamp=stamp,
-            claim_ids=[c["id"] for c in selected],
-            hash=digest(result.compilation_text),
             cache_name=result.provider_cache_name,
             cache_model=result.provider_cache_model,
             cache_expires=result.provider_cache_expires_at,
         )
         if rows:
             try:
-                await self.rows(
-                    """MATCH (r:SynapseHydrationRevision {user_id:$user})
-                    WITH r ORDER BY r.created_at DESC SKIP 20 DELETE r""",
-                    user=job["user"],
-                )
                 await self.rows(
                     """MATCH (r:SynapseHydrationSelection {user_id:$user})
                     WITH r ORDER BY r.created_at DESC SKIP 100 DELETE r""",

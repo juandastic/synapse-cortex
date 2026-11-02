@@ -1858,8 +1858,8 @@ episodes are attributed separately and retain clarifications containing "no recu
 
 Neo4j stores the current payload and leased work state in namespaced
 `hydration_*` properties on `SynapseUserCore`. `SynapseHydrationSource` caches
-verified extraction per source window and source hash. Audit revisions contain
-claim IDs/hashes, not old copies of personal text, with at most 20 revisions per user.
+verified extraction per source window and source hash. Only the current
+compilation revision is stored; no audit-history nodes are created.
 `SynapseHydrationSelection` caches selection IDs, capped at 100 entries after publication.
 None of these records are
 Graphiti `Entity` or `Episodic` nodes. The original graph remains unchanged.
@@ -1889,9 +1889,10 @@ explicit caches. Convex's existing cache remains a transport copy.
 Coverage tracks the full graph facts actually rendered. `included_edge_ids`
 contains their original UUIDs, including facts paraphrased by Graphiti, with
 temporal fields copied alongside the text. `included_node_ids` is empty
-for partially summarized entities. `source_node_ids`, `source_edge_ids` and
-`included_episode_ids` retain source lineage; they do not authorize excluding
-all details of an entity/episode. `is_partial` remains true. GraphRAG overfetches
+for partially summarized entities. `included_episode_ids` identifies dependencies
+for invalidation, and `compilation_revision` coordinates chat/cache refresh.
+No additional source-ID lists, citation maps or model-tracking fields are returned.
+Observability stays in PostHog. `is_partial` remains true. GraphRAG overfetches
 before deduplication and injects at most ten new edges and ten new nodes.
 
 Source stamps detect additions. Selected episode hashes and covered-fact hashes
@@ -1900,7 +1901,7 @@ Ingestion validates these dependencies before retaining an older snapshot.
 Graph Explorer and Notion corrections also revoke explicitly.
 Hydration notification failures are logged and do not prevent either correction
 path from writing its authoritative graph update.
-Revoked published text/cache IDs are replaced on the next chat request. The
+Revoked published text/cache IDs are replaced on the next chat request.
 Cleanup tools remove the derived labels as well as Graphiti's `group_id` records.
 
 Run `make verify` for offline contracts and failure recovery. The explicit

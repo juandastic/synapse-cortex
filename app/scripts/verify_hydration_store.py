@@ -58,6 +58,11 @@ async def main(env_file):
         assert await store.publish(job, await store.stamp(user), result, retained, episodes, edges)
         await store.release(job)
         assert (await store.read(user)).metadata.included_edge_ids == ["fact"]
+        audits = await store.rows(
+            "MATCH (n:SynapseHydrationRevision {user_id:$user}) RETURN count(n) AS count",
+            user=user,
+        )
+        assert audits[0]["count"] == 0
         state, refreshed = await store.chat_read(user, "previous-revision")
         assert state == "updated" and refreshed.compilation_text == result.compilation_text
         wire = await store.rows(

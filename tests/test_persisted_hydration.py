@@ -150,8 +150,6 @@ def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
     assert "2026-10-30" in result.compilation_text
     assert result.metadata.included_edge_ids == ["full"]
     assert result.metadata.included_node_ids == []
-    assert set(result.metadata.source_edge_ids) == {"full"}
-    assert result.metadata.source_node_ids == ["cousin", "university"]
     assert result.metadata.is_partial
     assert len(result.compilation_text) <= 1100
     assert len(retained) == 1
@@ -368,8 +366,28 @@ async def test_real_hydrate_router_returns_published_text_coverage_and_legacy_co
     assert body["userKnowledgeCompilation"] == "Current personal memory"
     assert body["compilationMetadata"]["compilation_revision"] == "revision"
     assert body["compilationMetadata"]["included_node_ids"] == []
+    assert set(body["compilationMetadata"]) == {
+        "is_partial",
+        "total_estimated_tokens",
+        "included_node_ids",
+        "included_edge_ids",
+        "included_episode_ids",
+        "compilation_revision",
+    }
     assert body["graphStats"]["entity_count"] == 1
     assert body["cacheName"] is None
+
+
+def test_prepared_snapshot_with_retired_tracking_metadata_remains_readable():
+    previous = asdict(published())
+    previous["metadata"].update(
+        source_node_ids=["person"],
+        source_edge_ids=["fact"],
+        citation_sources={"f1": {"edge_ids": ["fact"]}},
+        compiler_model="old-model",
+    )
+    restored = HydrationStore.result({"result": previous})
+    assert asdict(restored) == asdict(published())
 
 
 async def test_ingest_notifies_after_summary_and_before_completed_job():
