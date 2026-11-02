@@ -21,7 +21,7 @@ from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
-from app.services.hydration_compiler import HydrationCompiler, HydrationLLM
+from app.services.hydration_compiler import HydrationCompiler
 from app.services.hydration_store import HydrationStore
 from app.services.ingestion import IngestionService
 from app.services.notion_correction import NotionCorrectionService
@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
     if settings.persisted_hydration_enabled:
         persisted = PersistedHydration(
             HydrationStore(neo4j_driver),
-            HydrationCompiler(HydrationLLM(generation_client, settings.hydration_model)),
+            HydrationCompiler(graphiti.llm_client),
             hydration_service,
             cache_manager=cache_manager,
         )

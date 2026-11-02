@@ -12,7 +12,6 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-from google.genai import types
 from graphiti_core.prompts.models import Message
 from pydantic import BaseModel, Field
 
@@ -24,6 +23,7 @@ logger = logging.getLogger(__name__)
 EXTRACTION_VERSION = "extractive-1"
 CHAR_BUDGET = 100_000
 BATCH_CHARS = 60_000
+LLM_TIMEOUT_SECONDS = 90
 SECTIONS = (
     "Identidad y contexto",
     "Personas y vínculos",
@@ -61,9 +61,14 @@ class Extraction(BaseModel):
     spans: list[Span]
 
 
+class FactSection(BaseModel):
+    id: str
+    section: str
+
+
 class Selection(BaseModel):
     ids: list[str]
-    sections: dict[str, str] = Field(default_factory=dict)
+    sections: list[FactSection] = Field(default_factory=list)
 
 
 class UnverifiableEvidence(ValueError):
@@ -72,46 +77,6 @@ class UnverifiableEvidence(ValueError):
 
 class WorkPending(Exception):
     """Yield a large archive after bounded, durably cached work."""
-
-
-class HydrationLLM:
-    """Use an explicit medium model independently of graph extraction settings."""
-
-    def __init__(self, client, model):
-        self.client, self.model = client, model
-
-    async def generate_response(self, messages, *, response_model, max_tokens, prompt_name):
-        # Vertex's native schema compiler rejects some nested size constraints.
-        # Keep those constraints in Pydantic validation after generation.
-        def schema_without_sizes(value):
-            if isinstance(value, dict):
-                return {
-                    k: schema_without_sizes(v)
-                    for k, v in value.items()
-                    if k not in {"minLength", "maxLength", "minItems", "maxItems"}
-                }
-            if isinstance(value, list):
-                return [schema_without_sizes(v) for v in value]
-            return value
-
-        config = types.GenerateContentConfig(
-            system_instruction=messages[0].content,
-            response_mime_type="application/json",
-            response_json_schema=schema_without_sizes(response_model.model_json_schema()),
-            max_output_tokens=max_tokens,
-            thinking_config=types.ThinkingConfig(thinking_level="MEDIUM")
-            if self.model.startswith("gemini-3")
-            else None,
-        )
-        response = await asyncio.wait_for(
-            self.client.aio.models.generate_content(
-                model=self.model,
-                contents=messages[1].content,
-                config=config,
-            ),
-            timeout=90,
-        )
-        return response_model.model_validate_json(response.text).model_dump()
 
 
 EXTRACT_PROMPT = """Selecciona memoria personal útil para Synapse en español.
@@ -150,7 +115,7 @@ No conviertas el tratamiento de una prima en tratamiento del usuario.
 No llenes la memoria de interpretaciones biológicas o trauma a costa de preferencias
 y proyectos. No selecciones pruebas técnicas. Conserva correcciones aunque digan "no recuerdes".
 Devuelve SOLO IDs existentes. Con diez o más candidatas útiles, conserva al menos diez.
-En sections asigna cada ID seleccionado a una categoría usando su propio quote,
+En sections devuelve objetos {id, section} para los IDs seleccionados, usando su propio quote,
 no la etiqueta section/kind de evidence_quote, que pertenece a otro contexto.
 No reescribas las citas ni fabriques contenido."""
 
@@ -218,8 +183,26 @@ class HydrationCompiler:
         self.llm = llm
         self.char_budget = char_budget
 
+    async def _generate_response(self, messages, *, response_model, max_tokens, prompt_name):
+        # Share Graphiti's provider, primary model, retries and PostHog identity.
+        # Keep each hydration call within the worker's existing time/token budget.
+        token_limit = (
+            getattr(self.llm, "max_tokens", None)
+            or getattr(getattr(self.llm, "config", None), "max_tokens", None)
+            or max_tokens
+        )
+        return await asyncio.wait_for(
+            self.llm.generate_response(
+                messages,
+                response_model=response_model,
+                max_tokens=min(max_tokens, token_limit),
+                prompt_name=prompt_name,
+            ),
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+
     async def extract(self, sources: list[Source]) -> list[dict]:
-        response = await self.llm.generate_response(
+        response = await self._generate_response(
             [
                 Message(role="system", content=EXTRACT_PROMPT),
                 Message(
@@ -332,7 +315,7 @@ class HydrationCompiler:
                 sections = cached.get("sections", {}) if isinstance(cached, dict) else {}
                 if all(cid in lookup for cid in ids) and (limit < 180 or isinstance(cached, dict)):
                     return [{**lookup[cid], "fact_section": sections.get(cid)} for cid in ids]
-        response = await self.llm.generate_response(
+        response = await self._generate_response(
             [
                 Message(
                     role="system", content=SELECT_PROMPT + f"\nEn este lote máximo {limit} IDs."
@@ -361,9 +344,9 @@ class HydrationCompiler:
         else:
             ids = list(dict.fromkeys(selected.ids))[:limit]
             sections = {
-                cid: section
-                for cid, section in selected.sections.items()
-                if cid in ids and section in SECTIONS
+                item.id: item.section
+                for item in selected.sections
+                if item.id in ids and item.section in SECTIONS
             }
         if cache is not None:
             await cache.save(key, ids, sections=sections)

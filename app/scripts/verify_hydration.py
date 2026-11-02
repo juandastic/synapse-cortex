@@ -25,7 +25,7 @@ from app.schemas.models import IngestRequest
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.hydration import HydrationService
-from app.services.hydration_compiler import HydrationCompiler, HydrationLLM
+from app.services.hydration_compiler import HydrationCompiler
 from app.services.hydration_store import DELETE_HYDRATION_QUERY, HydrationStore
 from app.services.ingestion import IngestionService
 from app.services.job_store import create_job, get_job, remove_job
@@ -52,7 +52,7 @@ async def main(args):
     )
     store = HydrationStore(driver)
     legacy = HydrationService(driver)
-    compiler = HydrationCompiler(HydrationLLM(client, settings.hydration_model))
+    compiler = HydrationCompiler(graphiti.llm_client)
     worker = PersistedHydration(store, compiler, legacy)
     legacy.persisted = worker
     await store.initialize()
@@ -76,7 +76,8 @@ async def main(args):
         "real_neo4j": True,
         "real_llm": True,
         "graph_provider": settings.graphiti_provider,
-        "compiler_model": settings.hydration_model,
+        "compiler_provider": settings.graphiti_provider,
+        "compiler_model": settings.graphiti_model,
         "chat_model": settings.chat_model,
     }
     job_id = f"integration-{uuid4()}"
@@ -162,11 +163,26 @@ async def main(args):
                 restart_read_ok=True,
             )
             if not args.user:
-                assert "sobrina" in current.compilation_text
-                assert "Julia" in current.compilation_text
-                assert any(word in current.compilation_text.lower() for word in ("prima", "cousin"))
-                assert any(
-                    word in current.compilation_text.lower() for word in ("ingenier", "engineer")
+                # Only synthetic fixture data is included in assertion diagnostics.
+                _, fixture_edges = await store.snapshot(user)
+                fixture_nodes = await store.rows(
+                    "MATCH (n:Entity {group_id:$user}) RETURN n.summary AS summary",
+                    user=user,
+                )
+                diagnostic = {
+                    "compiled": current.compilation_text,
+                    "active_facts": [edge["fact"] for edge in fixture_edges],
+                    "entity_summaries": [node["summary"] or "" for node in fixture_nodes],
+                }
+                # The core is deliberately partial. Require the fixture's facts
+                # in the graph, and the complete answer below through core + RAG,
+                # rather than requiring one model's particular core selection.
+                graph_text = "\n".join(diagnostic["active_facts"] + diagnostic["entity_summaries"])
+                assert any(word in graph_text.lower() for word in ("sobrina", "niece")), diagnostic
+                assert "Julia" in graph_text, diagnostic
+                assert any(word in graph_text.lower() for word in ("prima", "cousin")), diagnostic
+                assert any(word in graph_text.lower() for word in ("ingenier", "engineer")), (
+                    diagnostic
                 )
                 chat = await http.post(
                     "/v1/chat/completions",

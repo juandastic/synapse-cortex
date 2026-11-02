@@ -1842,9 +1842,17 @@ episode + graph extraction -> episode summary attempted -> durable user job
 /hydrate -> published snapshot, or original v2 while the first build is pending
 ```
 
-The compiler uses `HYDRATION_MODEL=gemini-3-flash-preview` with the existing
-Google credentials, independently of the graph extraction model/provider. It
-extracts literal user/document spans as episode context, then selects existing
+The compiler reuses Graphiti's existing LLM client and primary model. Its provider,
+model, reasoning effort and output limit follow `GRAPHITI_PROVIDER`, `GRAPHITI_MODEL`,
+`GRAPHITI_REASONING_EFFORT` and `GRAPHITI_MAX_TOKENS`. With `GRAPHITI_PROVIDER=openrouter`,
+compilation uses the same OpenAI model, OpenRouter credential, retries and PostHog
+tracking as graph extraction. The prompt names `hydration.extract` and
+`hydration.select` identify these calls in PostHog. There is no separate hydration
+provider/model configuration or client lifecycle. Switching Graphiti to Vertex also
+switches the compiler; embeddings, chat and provider caches retain their existing
+configuration. Hydration keeps a 90-second limit per LLM call.
+
+It extracts literal user/document spans as episode context, then selects existing
 active graph facts. Published text copies those facts and temporal fields in full;
 old quotes cannot restore an invalidated relation. This preserves Graphiti's
 existing extraction quality and its limitations. It does not repair incorrect

@@ -56,7 +56,6 @@ class Settings(BaseSettings):
     # v2 clients transparently use a published compilation, with v2 fallback.
     # Disable to roll back without removing any graph data.
     persisted_hydration_enabled: bool = True
-    hydration_model: str = "gemini-3-flash-preview"
 
     # Axiom / OpenTelemetry (optional, tracing disabled if token is empty)
     # AXIOM_DOMAIN: base domain of your edge deployment (Settings > General in Axiom).

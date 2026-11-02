@@ -1,14 +1,16 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import openai
 import pytest
+from google.genai import types
 from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
 from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.llm_client.config import LLMConfig, ModelSize
+from graphiti_core.llm_client.gemini_client import GeminiClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message
 from tenacity import wait_none
@@ -19,6 +21,8 @@ from app.core.graphiti_client import create_graphiti
 from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
+from app.services.hydration_compiler import Extraction, HydrationCompiler, Source
+from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
 
 
@@ -370,3 +374,143 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
         assert graph.cross_encoder.config.model is None  # Google's default, never an OpenAI ID.
     finally:
         await graph.llm_client.close()
+
+
+async def test_hydration_reuses_openrouter_model_token_limit_and_posthog_tracking(
+    make_client, analytics
+):
+    requests = []
+    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        schema = payload["response_format"]["json_schema"]
+        if schema["name"] == "Extraction":
+            answer = {
+                "spans": [
+                    {
+                        "source_id": source.id,
+                        "quote": source.text,
+                        "section": "Personas y vínculos",
+                        "kind": "relato",
+                    }
+                ]
+            }
+        else:
+            answer = {
+                "ids": ["fact"],
+                "sections": [{"id": "fact", "section": "Personas y vínculos"}],
+            }
+        return httpx.Response(
+            200,
+            json=completion(
+                answer,
+                model=payload["model"],
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "cost": 0.001,
+                },
+            ),
+        )
+
+    shared_client = make_client(handler)
+    shared_client.max_tokens = 2048
+    compiler = HydrationCompiler(shared_client)
+    facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+    with posthog_user_context("owner", "hydration-trace", "session"):
+        quotes = await compiler.extract([source])
+        selected = await compiler.select(compiler.fact_candidates(quotes, facts))
+    result, _ = compiler.render(selected, facts, GraphStats(2, 1))
+    assert "Martina es mi sobrina" in result.compilation_text
+    assert result.metadata.included_edge_ids == ["fact"]
+    assert len(requests) == 2
+
+    def assert_strict_objects(schema):
+        if isinstance(schema, dict):
+            if schema.get("type") == "object":
+                assert schema["additionalProperties"] is False
+            for item in schema.values():
+                assert_strict_objects(item)
+        elif isinstance(schema, list):
+            for item in schema:
+                assert_strict_objects(item)
+
+    for request in requests:
+        assert request["model"] == "openai/main"
+        assert request["max_completion_tokens"] == 2048
+        assert request["reasoning"]["effort"] == "low"
+        assert request["response_format"]["json_schema"]["strict"] is True
+        assert_strict_objects(request["response_format"]["json_schema"]["schema"])
+    assert analytics.capture.call_count == 2
+    names = set()
+    for call in analytics.capture.call_args_list:
+        assert call.kwargs["distinct_id"] == "owner"
+        props = call.kwargs["properties"]
+        assert props["$ai_trace_id"] == "hydration-trace"
+        assert props["$ai_session_id"] == "session"
+        assert props["$ai_provider"] == "openrouter"
+        assert props["$ai_total_cost_usd"] == 0.001
+        names.add(props["prompt_name"])
+    assert names == {"hydration.extract", "hydration.select"}
+
+
+async def test_hydration_preserves_shared_gemini_rollback():
+    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+
+    async def generate(*, config, **kwargs):
+        if config.response_schema is Extraction:
+            content = {
+                "spans": [
+                    {
+                        "source_id": source.id,
+                        "quote": source.text,
+                        "section": "Personas y vínculos",
+                        "kind": "relato",
+                    }
+                ]
+            }
+        else:
+            content = {
+                "ids": ["fact"],
+                "sections": [{"id": "fact", "section": "Personas y vínculos"}],
+            }
+        return types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(
+                        parts=[types.Part.from_text(text=json.dumps(content))],
+                    )
+                )
+            ]
+        )
+
+    sdk = SimpleNamespace(
+        aio=SimpleNamespace(
+            models=SimpleNamespace(generate_content=AsyncMock(side_effect=generate))
+        )
+    )
+    shared_client = GeminiClient(LLMConfig(model="gemini-test", max_tokens=4096), client=sdk)
+    compiler = HydrationCompiler(shared_client)
+    facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+    quotes = await compiler.extract([source])
+    selected = await compiler.select(compiler.fact_candidates(quotes, facts))
+    assert selected[0]["fact_section"] == "Personas y vínculos"
+    assert sdk.aio.models.generate_content.await_count == 2
+    for call in sdk.aio.models.generate_content.await_args_list:
+        assert call.kwargs["model"] == "gemini-test"
+        assert call.kwargs["config"].max_output_tokens == 4096
+
+
+async def test_hydration_keeps_its_timeout_when_using_shared_client(monkeypatch):
+    monkeypatch.setattr("app.services.hydration_compiler.LLM_TIMEOUT_SECONDS", 0.01)
+
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
+    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+    with pytest.raises(TimeoutError):
+        await compiler.extract([source])

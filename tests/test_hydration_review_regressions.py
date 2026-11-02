@@ -312,7 +312,7 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
             generate_response=AsyncMock(
                 return_value={
                     "ids": ["medication"],
-                    "sections": {"medication": "Situación reciente"},
+                    "sections": [{"id": "medication", "section": "Situación reciente"}],
                 }
             )
         )
@@ -331,7 +331,7 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
     assert "Registros sin clasificar" in unclassified.compilation_text
     compiler.llm.generate_response.return_value = {
         "ids": ["medication"],
-        "sections": {"medication": "Unrecognized category"},
+        "sections": [{"id": "medication", "section": "Unrecognized category"}],
     }
     selected = await compiler.select(compiler.fact_candidates([quote], facts))
     neutral, _ = compiler.render(selected, facts, GraphStats(2, 1))
