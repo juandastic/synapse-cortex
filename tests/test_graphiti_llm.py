@@ -19,7 +19,7 @@ from app.core.graphiti_client import create_graphiti
 from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
-from app.services.hydration_compiler import HydrationCompiler, Source
+from app.services.hydration_compiler import HydrationCompiler
 from app.services.hydration_consolidation import consolidate
 from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
@@ -377,7 +377,7 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
 
 async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make_client, analytics):
     requests = []
-    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+    episode = dict(uuid="ep", valid_at="2026-11-01")
 
     def handler(request):
         payload = json.loads(request.content)
@@ -401,9 +401,9 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
 
     hydration_client = make_client(handler, model=HYDRATION_MODEL)
     compiler = HydrationCompiler(hydration_client)
-    facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+    facts = [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
-        selected = await compiler.group(compiler.fact_candidates([vars(source)], facts))
+        selected = await compiler.group(compiler.fact_candidates([episode], facts))
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Martina es mi sobrina" in result.compilation_text
     assert result.metadata.included_edge_ids == ["fact"]
@@ -497,10 +497,10 @@ async def test_hydration_limits_provider_call_duration(monkeypatch):
         await asyncio.Event().wait()
 
     compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
-    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+    episode = dict(uuid="ep", valid_at="2026-11-01")
     with pytest.raises(TimeoutError):
         await compiler.group(
             compiler.fact_candidates(
-                [vars(source)], [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+                [episode], [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
             )
         )

@@ -4,9 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
-import unicodedata
-from collections import Counter, defaultdict
+from collections import defaultdict
 
 from graphiti_core.prompts.models import Message
 from pydantic import BaseModel
@@ -14,21 +12,7 @@ from pydantic import BaseModel
 from app.services import hydration_result
 
 logger = logging.getLogger(__name__)
-CONSOLIDATION_VERSION = "consolidation-4"
-CONNECTORS = {"y", "e", "and"}
-NUMBER_WORDS = set(
-    """
-cero un una uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce
-quince dieciseis diecisiete dieciocho diecinueve veinte veintiuno veintiun veintidos
-veintitres veinticuatro veinticinco veintiseis veintisiete veintiocho veintinueve treinta
-cuarenta cincuenta sesenta setenta ochenta noventa cien ciento doscientos trescientos
-cuatrocientos quinientos seiscientos setecientos ochocientos novecientos mil miles
-millon millones billon billones medio media mitad docena
-zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
-fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy
-eighty ninety hundred thousand million billion half dozen
-""".split()
-)
+CONSOLIDATION_VERSION = "consolidation-5"
 SOURCE_FIELDS = (
     "id",
     "fact_id",
@@ -54,11 +38,7 @@ fechas, planes frente a decisiones y relaciones temporales. No infieras sexo, ap
 identidades equivalentes, causalidad o vigencia. No reconcilies contradicciones.
 No mezcles opiniones o consejos del asistente con vivencias ni los presentes como hechos
 clínicos comprobados. No inventes nada para conectar registros. No repitas un ID.
-Propón solo enumeraciones paralelas con el mismo predicado. No fusiones ubicaciones
-alternativas ni explicaciones con estructuras distintas, aunque traten del mismo tema.
-Conserva literalmente todas las palabras del predicado y de cada elemento enumerado.
-Solo puedes añadir conectores 'y' o 'e' en español o 'and' en inglés y puntuación,
-sin introducir palabras nuevas. Conserva el idioma original de los hechos.
+Si los hechos son distintos o hay dudas, déjalos separados. Conserva el idioma original.
 Las fechas de procedencia y vigencia ya las añade el código; no las cambies.
 Devuelve records vacío ante cualquier duda."""
 VERIFY_PROMPT = """Audita la fidelidad de propuestas de consolidación de memoria.
@@ -94,129 +74,6 @@ class Verification(BaseModel):
     reviews: list[Review]
 
 
-def _fold(text):
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", text.lower()) if not unicodedata.combining(c)
-    )
-
-
-def _details_preserved(text, facts):
-    original = " ".join(f["quote"] for f in facts)
-
-    def numbers(value):
-        return set(re.findall(r"\d+(?:[.,]\d+)*", value.replace(",", ".")))
-
-    if not numbers(original) <= numbers(text):
-        return False
-    # Lowercase details matter too: covering an ID must not hide its omitted
-    # food, subject, drug or qualifier from RAG. Broader paraphrases stay literal.
-    parts = _parallel_parts(facts)
-    if parts is None:
-        return False
-    head, slots, tail = parts
-    actual = re.findall(r"[\w-]+", _fold(text))
-    if actual[: len(head)] != head or (tail and actual[-len(tail) :] != tail):
-        return False
-    middle = actual[len(head) : len(actual) - len(tail) if tail else None]
-    expected = Counter(word for slot in slots for word in slot)
-    observed = Counter(word for word in middle if word in expected or word not in CONNECTORS)
-    return observed == expected and all(
-        any(middle[i : i + len(slot)] == slot for i in range(len(middle))) for slot in slots
-    )
-
-
-def _redundant(facts):
-    return any(_parallel([a, b]) for i, a in enumerate(facts) for b in facts[i + 1 :])
-
-
-def _parallel(facts):
-    return _parallel_parts(facts) is not None
-
-
-def _parallel_parts(facts):
-    """Require one short enumeration slot inside an otherwise identical formulation.
-
-    The model alone approved incompatible locations and descriptions in the real
-    archive. This veto deliberately leaves broader paraphrases literal.
-    """
-    raw = [re.findall(r"[\w-]+", f["quote"]) for f in facts]
-    tokens = [[_fold(word) for word in words] for words in raw]
-    shortest = min(map(len, tokens))
-    prefix = 0
-    while prefix < shortest and len({words[prefix] for words in tokens}) == 1:
-        prefix += 1
-    suffix = 0
-    while suffix < shortest - prefix and len({words[-suffix - 1] for words in tokens}) == 1:
-        suffix += 1
-    slots = [words[prefix : len(words) - suffix if suffix else None] for words in tokens]
-    spatial = {
-        "en",
-        "sobre",
-        "debajo",
-        "junto",
-        "detras",
-        "delante",
-        "lado",
-        "entre",
-        "in",
-        "at",
-        "on",
-        "under",
-        "near",
-        "below",
-        "above",
-        "behind",
-        "between",
-        "beside",
-        "inside",
-        "outside",
-    }
-    prefix_words = tokens[0][:prefix]
-    while prefix_words and prefix_words[-1] in {
-        "el",
-        "la",
-        "los",
-        "las",
-        "un",
-        "una",
-        "the",
-        "a",
-        "an",
-    }:
-        prefix_words = prefix_words[:-1]
-    if prefix_words and prefix_words[-1] in spatial:
-        return None
-    negation = {
-        "no",
-        "nunca",
-        "jamas",
-        "tampoco",
-        "dejo",
-        "ya",
-        "not",
-        "never",
-        "stopped",
-        "without",
-    }
-    raw_slots = [words[prefix : len(words) - suffix if suffix else None] for words in raw]
-    eligible = (
-        prefix >= 3
-        and prefix + suffix >= 6
-        and not negation.intersection(tokens[0][:prefix])
-        and all(
-            0 < len(slot) <= 4
-            and not (spatial | negation | NUMBER_WORDS).intersection(slot)
-            and not any(NUMBER_WORDS.intersection(word.split("-")) for word in slot)
-            for slot in slots
-        )
-        and all(
-            not any(word[0].isupper() or any(c.isdigit() for c in word) for word in slot)
-            for slot in raw_slots
-        )
-    )
-    return (tokens[0][:prefix], slots, tokens[0][-suffix:] if suffix else []) if eligible else None
-
-
 async def _generate(llm, prompt, data, schema, name):
     response = await asyncio.wait_for(
         llm.generate_response(
@@ -246,12 +103,7 @@ async def _verified_proposal(facts, llm):
     if len(set(claimed)) != len(claimed) or set(claimed) - aliases.keys():
         return []
     candidates = [
-        record
-        for record in proposal.records
-        if len(record.ids) >= 2
-        and record.text.strip()
-        and _parallel([aliases[cid] for cid in record.ids])
-        and _details_preserved(record.text, [aliases[cid] for cid in record.ids])
+        record for record in proposal.records if len(record.ids) >= 2 and record.text.strip()
     ]
     if not candidates:
         return []
@@ -328,9 +180,7 @@ async def _consolidate_batch(facts, llm, cache, retry_epoch):
 async def consolidate(grouped: list[dict], llm, cache=None, *, retry_epoch=None) -> list[dict]:
     cohorts = defaultdict(list)
     for fact in grouped:
-        if fact.get("source_uuid") and not any(
-            fact.get(k) for k in ("excluded", "excluded_context", "classification_fallback")
-        ):
+        if fact.get("source_uuid") and not fact.get("classification_fallback"):
             scope = tuple(
                 fact.get(k)
                 for k in (
@@ -349,7 +199,7 @@ async def consolidate(grouped: list[dict], llm, cache=None, *, retry_epoch=None)
         # Small independent batches bound provider work and the verifier's source context.
         for start in range(0, len(ordered), 12):
             batch = ordered[start : start + 12]
-            if len(batch) > 1 and sum(len(f["quote"]) for f in batch) <= 6000 and _redundant(batch):
+            if len(batch) > 1 and sum(len(f["quote"]) for f in batch) <= 6000:
                 result = await _consolidate_batch(batch, llm, cache, retry_epoch)
                 for fact in batch:
                     replacements[fact["id"]] = None

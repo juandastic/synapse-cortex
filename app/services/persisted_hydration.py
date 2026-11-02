@@ -3,16 +3,13 @@
 import asyncio
 import logging
 import time
-from dataclasses import asdict
 
 from app.core.posthog import posthog_user_context
 from app.services.hydration_compiler import (
     COMPILER_VERSION,
-    EXCLUDED_SECTION,
     HydrationCompiler,
     WorkPending,
     digest,
-    sources_from_episodes,
 )
 from app.services.hydration_consolidation import consolidate
 
@@ -78,19 +75,14 @@ class PersistedHydration:
         user = job["user"]
         stamp = await self.store.stamp(user)
         episodes, edges = await self.store.snapshot(user)
-        sources = sources_from_episodes(episodes)
         with posthog_user_context(user):
-            candidates = self.compiler.fact_candidates(
-                [asdict(source) for source in sources],
-                edges,
-                episode_ids={episode["uuid"] for episode in episodes},
-            )
+            candidates = self.compiler.fact_candidates(episodes, edges)
             cache = self.store.group_cache(job)
             grouped, seen_hashes = await self._group_incremental(job, candidates, cache=cache)
             records = await consolidate(
                 grouped, self.compiler.llm, cache, retry_epoch=job["generation"]
             )
-        result, _ = await self._render_guarded(user, sources, candidates, records, edges)
+        result, _ = await self._render_guarded(user, candidates, records, edges)
         return await self._publish_if_unchanged(
             job,
             stamp,
@@ -122,9 +114,6 @@ class PersistedHydration:
                 grouped[cid] = {
                     **candidate,
                     "fact_section": sections[cid],
-                    "excluded": sections[cid] == EXCLUDED_SECTION
-                    and bool(candidate.get("excluded_context"))
-                    and not candidate.get("correction"),
                 }
             else:
                 pending.append(
@@ -144,23 +133,14 @@ class PersistedHydration:
             grouped.update({c["id"]: c for c in classified})
         return [grouped[c["id"]] for c in candidates], seen_hashes
 
-    async def _render_guarded(self, user, sources, candidates, grouped, edges):
+    async def _render_guarded(self, user, candidates, grouped, edges):
         if candidates and not grouped:
             raise ValueError("Grouping omitted every available fact; preserving legacy hydration")
         stats = await self.hydration_service.fetch_graph_stats(user)
-        all_sources_excluded = (
-            not grouped and bool(sources) and all(source.excluded for source in sources)
-        )
-        if (
-            not grouped
-            and not all_sources_excluded
-            and (sources or stats.entity_count or stats.relationship_count)
-        ):
-            raise UnsupportedArchive(
-                "Graph knowledge has no usable episodic evidence; preserving v2"
-            )
+        if not grouped and (stats.entity_count or stats.relationship_count):
+            raise UnsupportedArchive("No active graph facts; preserving classic hydration")
         result, retained = self.compiler.render(grouped, edges, stats)
-        if any(not c.get("excluded") for c in grouped) and not result.compilation_text:
+        if grouped and not result.compilation_text:
             raise ValueError("Compilation budget omitted every available fact")
         return result, retained
 
@@ -213,9 +193,7 @@ class PersistedHydration:
             pass
         except UnsupportedArchive:
             terminal = True
-            logger.info(
-                "No supported profile sources; preserving legacy hydration until memory changes"
-            )
+            logger.info("No active graph facts; preserving classic hydration until memory changes")
         except asyncio.CancelledError:
             if not lost.is_set():
                 raise

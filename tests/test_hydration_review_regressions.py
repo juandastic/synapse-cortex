@@ -13,7 +13,6 @@ from app.services.hydration_compiler import (
     HydrationCompiler,
     WorkPending,
     digest,
-    sources_from_episodes,
 )
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.hydration_store import GroupCache, HydrationStore
@@ -23,6 +22,9 @@ from app.services.persisted_hydration import PersistedHydration, UnsupportedArch
 
 def evidence(ep="a", text="Tengo diabetes. Mi gato se llama Leo."):
     return dict(
+        uuid=ep,
+        valid_at="2026-11-01",
+        source="message",
         id="quote-" + ep,
         source_id=ep + ":0:0",
         episode_id=ep,
@@ -81,24 +83,6 @@ def test_invalidated_fact_never_returns_from_old_quote_even_with_other_active_ed
     assert "Tengo diabetes" not in result.compilation_text
     assert "La prima tiene diabetes" in result.compilation_text
     assert set(result.metadata.included_edge_ids) == {"cat", "corrected"}
-
-
-@pytest.mark.parametrize("name", ["user_memory_correction", "notion_correction"])
-def test_correction_is_preserved_despite_do_not_remember_words(name):
-    sources = sources_from_episodes(
-        [
-            dict(
-                uuid="correction",
-                source="text",
-                name=name,
-                content="No recuerdes que era mi hija. Martina es mi sobrina.",
-                valid_at="2026-11-01",
-            )
-        ]
-    )
-    assert len(sources) == 1
-    assert sources[0].correction
-    assert sources[0].attribution == "corrección del usuario"
 
 
 def test_coverage_handles_graph_paraphrases_and_preserves_temporal_fields():
@@ -340,9 +324,14 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
     assert grouped.metadata.included_edge_ids == ["medication"]
 
 
-def test_mandatory_correction_keeps_an_explicit_group_when_model_did_not_select_it():
+@pytest.mark.parametrize("name", ["user_memory_correction", "notion_correction"])
+def test_mandatory_correction_keeps_an_explicit_group_when_model_did_not_select_it(name):
     compiler = HydrationCompiler(None)
-    quote = {**evidence(text="Julia es mi prima."), "correction": True}
+    quote = {
+        **evidence(text="Julia es mi prima."),
+        "source": "text",
+        "name": name,
+    }
     facts = [edge("cousin", "Julia es mi prima.")]
     candidates = compiler.fact_candidates([quote], facts)
     result, retained = compiler.render(candidates, facts, GraphStats(2, 1))

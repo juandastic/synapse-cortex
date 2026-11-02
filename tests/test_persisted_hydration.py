@@ -12,16 +12,18 @@ from app.schemas.models import ChatCompletionRequest
 from app.services.hydration import HydrationService
 from app.services.hydration_compiler import (
     HydrationCompiler,
-    sources_from_episodes,
 )
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.hydration_store import HydrationStore
-from app.services.persisted_hydration import PersistedHydration
+from app.services.persisted_hydration import PersistedHydration, UnsupportedArchive
 
 
 def claim(quote="Mi prima Julia es quien estudia ingeniería en Bogotá.", **extra):
     return dict(
         id="claim",
+        uuid="ep",
+        valid_at="2026-10-30",
+        source="message",
         source_id="ep:0:0",
         episode_id="ep",
         date="2026-10-30",
@@ -37,44 +39,6 @@ def published(text="Current personal memory"):
     return HydrationResult(
         text, CompilationMetadata(True, 10, compilation_revision="revision"), GraphStats(1, 1)
     )
-
-
-def test_source_parser_keeps_all_user_text_and_imports_without_assistant_assertions():
-    text = "Mi prima estudia ingeniería. " * 1200
-    sources = sources_from_episodes(
-        [
-            dict(
-                uuid="ep",
-                valid_at="2026-10-30",
-                source="message",
-                content=f"User: {text}\n\nAssistant: You are an engineer.\n\nUser: Soy diseñadora.",
-            ),
-            dict(uuid="doc", valid_at="2026-10-01", source="text", content="Perfil aportado " * 10),
-        ]
-    )
-    assert all("You are an engineer" not in s.text for s in sources)
-    assert any("Soy diseñadora" in s.text for s in sources)
-    assert any(s.attribution == "documento aportado" for s in sources)
-    assert any(s.id == "ep:0:28000" for s in sources)
-
-
-def test_explicit_exclusions_and_technical_tests_are_not_compiled():
-    sources = sources_from_episodes(
-        [
-            dict(
-                uuid="ep",
-                source="message",
-                valid_at="2026-11-01",
-                content="User: No guardes este mensaje como dato personal: vivo en París.\n\n"
-                "User: Prueba técnica de integración: Qwen listo.\n\n"
-                "User: Prefiero explicaciones concretas con ejemplos.",
-            )
-        ]
-    )
-    assert sum(s.excluded for s in sources) == 2
-    assert [s.text for s in sources if not s.excluded] == [
-        "Prefiero explicaciones concretas con ejemplos."
-    ]
 
 
 async def test_current_text_still_updates_coverage_metadata():
@@ -236,7 +200,7 @@ async def test_graph_only_archive_keeps_legacy_memory_instead_of_publishing_empt
         HydrationCompiler(None),
         SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1))),
     )
-    with pytest.raises(ValueError, match="preserving v2"):
+    with pytest.raises(UnsupportedArchive):
         await service.build(dict(user="owner", token="lease", generation=1))
     store.publish.assert_not_awaited()
 
