@@ -54,8 +54,10 @@ async def main(env_file):
         )
         selected = compiler.fact_candidates([quote], edges)
         result, retained = compiler.render(selected, edges, GraphStats(2, 1))
-        result.seen_hashes = {f"id-{i}": "x" * 64 for i in range(1000)}
-        assert await store.publish(job, await store.stamp(user), result, retained, episodes, edges)
+        seen_hashes = {f"id-{i}": "x" * 64 for i in range(1000)}
+        assert await store.publish(
+            job, await store.stamp(user), result, retained, episodes, edges, seen_hashes=seen_hashes
+        )
         await store.release(job)
         assert (await store.read(user)).metadata.included_edge_ids == ["fact"]
         audits = await store.rows(
@@ -91,7 +93,9 @@ async def main(env_file):
         await cache.save("batch", ["fact"])
         assert await store.selection_cache(job).load("batch") == {"ids": ["fact"], "sections": {}}
         episodes, edges = await store.snapshot(user)
-        assert await store.publish(job, await store.stamp(user), result, retained, episodes, edges)
+        assert await store.publish(
+            job, await store.stamp(user), result, retained, episodes, edges, seen_hashes=seen_hashes
+        )
         await store.release(job)
 
         # Invalidating a covered fact revokes it without advancing the worker generation.

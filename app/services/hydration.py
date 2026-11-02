@@ -93,7 +93,7 @@ class HydrationService:
     async def refresh_chat_compilation(self, request) -> bool:
         """Pick up a newly published revision without waiting for a new session.
 
-        Existing v1/v2-only clients and disabled deployments retain their contract.
+        Existing v1 and legacy clients retain their contract.
         A revoked published snapshot must never survive through the client's cache.
         """
         if (
@@ -158,7 +158,7 @@ class HydrationService:
             published = await self.persisted.read(user_id)
             if published is not None:
                 return published
-        graph_stats = await self._fetch_graph_stats(user_id)
+        graph_stats = await self.fetch_graph_stats(user_id)
 
         if version == "v2":
             engine = HydrationV2Engine(self.driver, self.min_degree)
@@ -327,7 +327,7 @@ class HydrationService:
             mark_span_success(span)
             return lines
 
-    async def _fetch_graph_stats(self, group_id: str) -> GraphStats:
+    async def fetch_graph_stats(self, group_id: str) -> GraphStats:
         """
         Fetch total entity and relationship counts for the user's graph.
 

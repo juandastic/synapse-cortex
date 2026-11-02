@@ -253,13 +253,54 @@ async def test_incremental_selection_uses_previous_context_plus_changed_facts_on
     service = PersistedHydration(
         store,
         compiler,
-        SimpleNamespace(_fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 101))),
+        SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 101))),
     )
     assert await service.build(dict(user="owner", token="lease", generation=1))
     import json
 
     offered = json.loads(compiler.llm.generate_response.await_args.args[0][1].content)
     assert {c["id"] for c in offered} == {"old0", "old1", "old2", "new"}
+
+
+@pytest.mark.parametrize("previous_state", ["unchanged", "selected_removed", "old_version"])
+async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previous_state):
+    ep = dict(
+        uuid="a", source="message", valid_at="2026-11-01", content="User: Mi gato se llama Leo."
+    )
+    source = sources_from_episodes([ep])[0]
+    facts = [edge("cat", "Mi gato se llama Leo.")]
+    compiler = HydrationCompiler(
+        SimpleNamespace(generate_response=AsyncMock(return_value={"ids": ["cat"]}))
+    )
+    candidates = compiler.fact_candidates([evidence()], facts)
+    previous = dict(
+        compiler=COMPILER_VERSION,
+        selected=[{**candidates[0], "fact_section": "Personas y vínculos"}],
+        seen_hashes={c["id"]: digest(c) for c in candidates},
+    )
+    if previous_state == "selected_removed":
+        previous["selected"] = [{"id": "retired"}]
+    elif previous_state == "old_version":
+        previous["compiler"] = "older-compiler"
+    store = SimpleNamespace(
+        stamp=AsyncMock(return_value="stamp"),
+        snapshot=AsyncMock(return_value=([ep], facts)),
+        prune_sources=AsyncMock(),
+        cached_sources=AsyncMock(return_value={source.id: (source.hash, [evidence()])}),
+        current=AsyncMock(return_value=previous),
+        selection_cache=lambda job: None,
+        publish=AsyncMock(return_value=True),
+    )
+    service = PersistedHydration(
+        store, compiler, SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1)))
+    )
+    assert await service.build(dict(user="owner", token="lease", generation=1))
+    selected = store.publish.await_args.args[3]
+    assert [item["id"] for item in selected] == ["cat"]
+    assert store.publish.await_args.kwargs["seen_hashes"] == previous["seen_hashes"]
+    assert compiler.llm.generate_response.await_count == (0 if previous_state == "unchanged" else 1)
+    if previous_state == "unchanged":
+        assert selected[0]["fact_section"] == "Personas y vínculos"
 
 
 async def test_unsupported_archive_becomes_terminal_until_memory_changes():

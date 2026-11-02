@@ -165,13 +165,13 @@ def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
 
 async def test_hydration_reads_publication_and_preserves_v1_and_cold_v2_fallback():
     legacy = HydrationService(None)
-    legacy._fetch_graph_stats = AsyncMock(return_value=GraphStats(0, 0))
+    legacy.fetch_graph_stats = AsyncMock(return_value=GraphStats(0, 0))
     legacy._build_v1 = AsyncMock(return_value=HydrationResult("v1"))
     legacy.persisted = SimpleNamespace(read=AsyncMock(return_value=published()))
     assert (
         await legacy.build_user_knowledge("owner", "v2")
     ).compilation_text == "Current personal memory"
-    legacy._fetch_graph_stats.assert_not_awaited()
+    legacy.fetch_graph_stats.assert_not_awaited()
     assert (await legacy.build_user_knowledge("owner", "v1")).compilation_text == "v1"
 
 
@@ -215,7 +215,7 @@ async def test_completed_worker_reuses_unchanged_source_extraction_and_checks_re
         current=AsyncMock(return_value=None),
         selection_cache=lambda job: None,
     )
-    legacy = SimpleNamespace(_fetch_graph_stats=AsyncMock(return_value=GraphStats(0, 0)))
+    legacy = SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(0, 0)))
     service = PersistedHydration(store, compiler, legacy)
     assert await service.build(dict(user="owner", token="lease", generation=1))
     assert compiler.llm.generate_response.await_count == 1  # Selection only, no extraction.
@@ -242,7 +242,7 @@ async def test_graph_only_archive_keeps_legacy_memory_instead_of_publishing_empt
     service = PersistedHydration(
         store,
         HydrationCompiler(None),
-        SimpleNamespace(_fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1))),
+        SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1))),
     )
     with pytest.raises(ValueError, match="preserving v2"):
         await service.build(dict(user="owner", token="lease", generation=1))

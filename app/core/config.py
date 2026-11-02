@@ -10,6 +10,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
+HYDRATION_MODEL = "openai/gpt-6-luna"
+
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -52,10 +54,6 @@ class Settings(BaseSettings):
     # Controls max concurrent LLM operations. Lower values help avoid 429 rate limit errors.
     # Default is 10. Reduce to 3-5 if you encounter rate limiting issues.
     semaphore_limit: int = 3
-
-    # v2 clients transparently use a published compilation, with v2 fallback.
-    # Disable to roll back without removing any graph data.
-    persisted_hydration_enabled: bool = True
 
     # Axiom / OpenTelemetry (optional, tracing disabled if token is empty)
     # AXIOM_DOMAIN: base domain of your edge deployment (Settings > General in Axiom).

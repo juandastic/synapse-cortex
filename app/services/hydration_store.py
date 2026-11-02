@@ -332,7 +332,7 @@ class HydrationStore:
         if not rows:
             raise RuntimeError("Hydration source cleanup lost its lease or revision")
 
-    async def publish(self, job, stamp, result, selected, episodes, edges):
+    async def publish(self, job, stamp, result, selected, episodes, edges, *, seen_hashes):
         revision = str(uuid4())
         result.metadata.compilation_revision = revision
         source_ids = set(result.metadata.included_episode_ids)
@@ -344,7 +344,7 @@ class HydrationStore:
                 "result": asdict(result),
                 "source_hashes": hashes,
                 "selected": selected,
-                "seen_hashes": getattr(result, "seen_hashes", {}),
+                "seen_hashes": seen_hashes,
                 "edge_hashes": {
                     e["uuid"]: digest([e["fact"], e.get("valid_at"), e.get("invalid_at")])
                     for e in edges

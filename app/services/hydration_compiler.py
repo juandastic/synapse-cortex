@@ -184,18 +184,11 @@ class HydrationCompiler:
         self.char_budget = char_budget
 
     async def _generate_response(self, messages, *, response_model, max_tokens, prompt_name):
-        # Share Graphiti's provider, primary model, retries and PostHog identity.
-        # Keep each hydration call within the worker's existing time/token budget.
-        token_limit = (
-            getattr(self.llm, "max_tokens", None)
-            or getattr(getattr(self.llm, "config", None), "max_tokens", None)
-            or max_tokens
-        )
         return await asyncio.wait_for(
             self.llm.generate_response(
                 messages,
                 response_model=response_model,
-                max_tokens=min(max_tokens, token_limit),
+                max_tokens=max_tokens,
                 prompt_name=prompt_name,
             ),
             timeout=LLM_TIMEOUT_SECONDS,

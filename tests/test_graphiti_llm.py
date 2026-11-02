@@ -1,27 +1,25 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import httpx
 import openai
 import pytest
-from google.genai import types
 from graphiti_core.cross_encoder.gemini_reranker_client import GeminiRerankerClient
 from graphiti_core.driver.driver import GraphDriver
 from graphiti_core.llm_client.config import LLMConfig, ModelSize
-from graphiti_core.llm_client.gemini_client import GeminiClient
 from graphiti_core.prompts.extract_nodes import ExtractedEntities
 from graphiti_core.prompts.models import Message
 from tenacity import wait_none
 
 from app.core import posthog
-from app.core.config import Settings
+from app.core.config import HYDRATION_MODEL, Settings
 from app.core.graphiti_client import create_graphiti
 from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
-from app.services.hydration_compiler import Extraction, HydrationCompiler, Source
+from app.services.hydration_compiler import HydrationCompiler, Source
 from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
 
@@ -54,7 +52,7 @@ def analytics(monkeypatch):
 async def make_client():
     clients = []
 
-    def make(handler):
+    def make(handler, model="openai/main"):
         sdk = openai.AsyncOpenAI(
             api_key="test-only",
             base_url="https://openrouter.ai/api/v1",
@@ -62,7 +60,7 @@ async def make_client():
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         client = OpenRouterGraphitiClient(
-            LLMConfig(model="openai/main", small_model="openai/small"), client=sdk
+            LLMConfig(model=model, small_model="openai/small"), client=sdk
         )
         clients.append(client)
         return client
@@ -376,9 +374,7 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
         await graph.llm_client.close()
 
 
-async def test_hydration_reuses_openrouter_model_token_limit_and_posthog_tracking(
-    make_client, analytics
-):
+async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make_client, analytics):
     requests = []
     source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
 
@@ -416,9 +412,8 @@ async def test_hydration_reuses_openrouter_model_token_limit_and_posthog_trackin
             ),
         )
 
-    shared_client = make_client(handler)
-    shared_client.max_tokens = 2048
-    compiler = HydrationCompiler(shared_client)
+    hydration_client = make_client(handler, model=HYDRATION_MODEL)
+    compiler = HydrationCompiler(hydration_client)
     facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
         quotes = await compiler.extract([source])
@@ -439,8 +434,8 @@ async def test_hydration_reuses_openrouter_model_token_limit_and_posthog_trackin
                 assert_strict_objects(item)
 
     for request in requests:
-        assert request["model"] == "openai/main"
-        assert request["max_completion_tokens"] == 2048
+        assert request["model"] == HYDRATION_MODEL
+        assert 0 < request["max_completion_tokens"] <= 16384
         assert request["reasoning"]["effort"] == "low"
         assert request["response_format"]["json_schema"]["strict"] is True
         assert_strict_objects(request["response_format"]["json_schema"]["schema"])
@@ -457,54 +452,7 @@ async def test_hydration_reuses_openrouter_model_token_limit_and_posthog_trackin
     assert names == {"hydration.extract", "hydration.select"}
 
 
-async def test_hydration_preserves_shared_gemini_rollback():
-    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
-
-    async def generate(*, config, **kwargs):
-        if config.response_schema is Extraction:
-            content = {
-                "spans": [
-                    {
-                        "source_id": source.id,
-                        "quote": source.text,
-                        "section": "Personas y vínculos",
-                        "kind": "relato",
-                    }
-                ]
-            }
-        else:
-            content = {
-                "ids": ["fact"],
-                "sections": [{"id": "fact", "section": "Personas y vínculos"}],
-            }
-        return types.GenerateContentResponse(
-            candidates=[
-                types.Candidate(
-                    content=types.Content(
-                        parts=[types.Part.from_text(text=json.dumps(content))],
-                    )
-                )
-            ]
-        )
-
-    sdk = SimpleNamespace(
-        aio=SimpleNamespace(
-            models=SimpleNamespace(generate_content=AsyncMock(side_effect=generate))
-        )
-    )
-    shared_client = GeminiClient(LLMConfig(model="gemini-test", max_tokens=4096), client=sdk)
-    compiler = HydrationCompiler(shared_client)
-    facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
-    quotes = await compiler.extract([source])
-    selected = await compiler.select(compiler.fact_candidates(quotes, facts))
-    assert selected[0]["fact_section"] == "Personas y vínculos"
-    assert sdk.aio.models.generate_content.await_count == 2
-    for call in sdk.aio.models.generate_content.await_args_list:
-        assert call.kwargs["model"] == "gemini-test"
-        assert call.kwargs["config"].max_output_tokens == 4096
-
-
-async def test_hydration_keeps_its_timeout_when_using_shared_client(monkeypatch):
+async def test_hydration_limits_provider_call_duration(monkeypatch):
     monkeypatch.setattr("app.services.hydration_compiler.LLM_TIMEOUT_SECONDS", 0.01)
 
     async def stalled(*args, **kwargs):

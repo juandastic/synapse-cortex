@@ -16,11 +16,13 @@ from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI
+from graphiti_core.llm_client.config import LLMConfig
 from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
-from app.core.config import Settings, create_genai_client
+from app.core.config import HYDRATION_MODEL, Settings, create_genai_client
 from app.core.graphiti_client import create_graphiti
+from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.schemas.models import IngestRequest
 from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
@@ -40,6 +42,8 @@ async def main(args):
     settings = Settings(_env_file=args.env_file)
     if urlsplit(settings.neo4j_uri).hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise ValueError("Integration verification only permits a local Neo4j")
+    if not settings.open_router_api_key:
+        raise ValueError("OPEN_ROUTER_API_KEY is required for hydration compilation")
     # Router authentication uses the same already-loaded settings, without printing secrets.
     import app.core.security as security
 
@@ -52,7 +56,16 @@ async def main(args):
     )
     store = HydrationStore(driver)
     legacy = HydrationService(driver)
-    compiler = HydrationCompiler(graphiti.llm_client)
+    hydration_llm = OpenRouterGraphitiClient(
+        LLMConfig(
+            api_key=settings.open_router_api_key,
+            model=HYDRATION_MODEL,
+            small_model=HYDRATION_MODEL,
+            max_tokens=16384,
+        ),
+        reasoning_effort="low",
+    )
+    compiler = HydrationCompiler(hydration_llm)
     worker = PersistedHydration(store, compiler, legacy)
     legacy.persisted = worker
     await store.initialize()
@@ -76,8 +89,8 @@ async def main(args):
         "real_neo4j": True,
         "real_llm": True,
         "graph_provider": settings.graphiti_provider,
-        "compiler_provider": settings.graphiti_provider,
-        "compiler_model": settings.graphiti_model,
+        "compiler_provider": "openrouter",
+        "compiler_model": HYDRATION_MODEL,
         "chat_model": settings.chat_model,
     }
     job_id = f"integration-{uuid4()}"
@@ -225,6 +238,7 @@ async def main(args):
             await store.rows("MATCH (n {group_id:$user}) DETACH DELETE n", user=user)
             await store.rows(DELETE_HYDRATION_QUERY, user=user)
         await app.state.openrouter_generation_service.close()
+        await hydration_llm.close()
         await graphiti.close()
         if hasattr(graphiti.llm_client, "close"):
             await graphiti.llm_client.close()
