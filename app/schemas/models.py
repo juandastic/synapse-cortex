@@ -61,6 +61,7 @@ class CompilationMetadataResponse(BaseModel):
     compiler_model: str | None = None
     source_node_ids: list[str] = Field(default_factory=list)
     source_edge_ids: list[str] = Field(default_factory=list)
+    citation_sources: dict[str, dict[str, list[str]]] = Field(default_factory=dict)
 
 
 class IngestAcceptedResponse(BaseModel):

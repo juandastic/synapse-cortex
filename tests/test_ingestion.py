@@ -91,3 +91,29 @@ async def test_background_failure_is_pollable_instead_of_leaving_job_processing(
     job = get_job(ingest_request.jobId)
     assert job.status == "failed"
     assert "graph offline" in job.error
+
+
+async def test_summary_timeout_still_enqueues_and_completes_committed_ingestion(
+    ingest_request, monkeypatch
+):
+    monkeypatch.setattr("app.services.ingestion.SUMMARY_TIMEOUT_SECONDS", 0.01)
+    graph = SimpleNamespace(
+        add_episode=AsyncMock(
+            return_value=SimpleNamespace(
+                nodes=[],
+                edges=[],
+                episode=SimpleNamespace(uuid="episode"),
+            )
+        )
+    )
+    changed = AsyncMock()
+    service = IngestionService(graph, "test-model", changed)
+
+    async def stalled_summary(_):
+        await asyncio.Event().wait()
+
+    service._summarize_episode = stalled_summary
+    create_job(ingest_request.jobId, ingest_request.userId, ingest_request.sessionId)
+    await service._process_background(ingest_request.jobId, ingest_request)
+    assert get_job(ingest_request.jobId).status == "completed"
+    changed.assert_awaited_once_with("owner")

@@ -78,6 +78,27 @@ from app.services.notion_export_job_store import (
 
 logger = logging.getLogger(__name__)
 
+
+async def _compilation_cache(user, result, manager, hydration):
+    if (
+        result.provider_cache_name
+        and result.provider_cache_expires_at > time.time() + 30
+        and result.provider_cache_model == getattr(manager, "model_name", None)
+    ):
+        return result.provider_cache_name, ""
+    name, reason = await manager.create_compilation_cache(user, result.compilation_text)
+    persisted = getattr(hydration, "persisted", None)
+    revision = getattr(result.metadata, "compilation_revision", None)
+    if name and persisted and revision:
+        try:
+            await persisted.store.set_cache(
+                user, revision, name, manager.model_name, time.time() + manager.ttl_seconds
+            )
+        except Exception:
+            logger.warning("Could not save provider cache association; text remains available")
+    return name, reason
+
+
 router = APIRouter()
 
 
@@ -96,6 +117,7 @@ def _to_metadata_response(
         compiler_model=meta.compiler_model,
         source_node_ids=meta.source_node_ids,
         source_edge_ids=meta.source_edge_ids,
+        citation_sources=meta.citation_sources,
     )
 
 
@@ -254,9 +276,11 @@ async def ingest_status(
             )
         # Create Gemini cache for this compilation (skipped for small ones).
         cache_start = time.monotonic()
-        cache_name, cache_skip_reason = await cache_manager.create_compilation_cache(
+        cache_name, cache_skip_reason = await _compilation_cache(
             job.user_id,
-            result.compilation_text,
+            result,
+            cache_manager,
+            hydration_service,
         )
         cache_creation_ms = round((time.monotonic() - cache_start) * 1000, 2)
         set_span_attributes(
@@ -347,9 +371,11 @@ async def hydrate_user(
         )
         # Create Gemini cache for this compilation (skipped for small ones).
         cache_start = time.monotonic()
-        cache_name, cache_skip_reason = await cache_manager.create_compilation_cache(
+        cache_name, cache_skip_reason = await _compilation_cache(
             request.userId,
-            result.compilation_text,
+            result,
+            cache_manager,
+            hydration_service,
         )
         cache_creation_ms = round((time.monotonic() - cache_start) * 1000, 2)
         set_span_attributes(
@@ -427,12 +453,7 @@ async def chat_completions(
         openrouter_generation_service.validate_request(request)
         # This is request-local. The stored Gemini cache stays available for later turns.
         request.cache_name = None
-    refreshed = await hydration_service.refresh_chat_compilation(request)
-    if refreshed and request.compilation and request.provider == "vertex":
-        request.cache_name, _ = await cache_manager.create_compilation_cache(
-            request.user_id,
-            request.compilation,
-        )
+    await hydration_service.refresh_chat_compilation(request)
     span = trace.get_current_span()
     system_prompt_chars = 0
     has_images = False

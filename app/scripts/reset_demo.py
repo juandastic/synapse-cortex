@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from neo4j import AsyncGraphDatabase
 
 from app.core.config import get_settings
+from app.services.hydration_store import DELETE_HYDRATION_QUERY
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ async def run(group_id: str, dry_run: bool) -> None:
         await driver.verify_connectivity()
 
         async with driver.session() as neo4j_session:
+            await neo4j_session.run(DELETE_HYDRATION_QUERY, user=group_id)
             # 1. Delete existing data for this group_id
             result = await neo4j_session.run(
                 "MATCH (n {group_id: $gid}) DETACH DELETE n",

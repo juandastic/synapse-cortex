@@ -52,6 +52,8 @@ SUMMARY_PROMPT = (
 
 # Cap input to the summarization call to control cost
 SUMMARY_INPUT_LIMIT = 8000
+SUMMARY_TIMEOUT_SECONDS = 30
+SUMMARY_STORE_TIMEOUT_SECONDS = 10
 
 
 class EpisodeSummary(BaseModel):
@@ -174,11 +176,25 @@ class IngestionService:
                 # Summarize the episode and store on the Neo4j node.
                 # Finalize evidence before publishing completion or queuing compilation.
                 if result.episode:
-                    with posthog_user_context(request.userId, posthog_trace_id, request.sessionId):
-                        summary = await self._summarize_episode(episode_content)
-                    if summary:
-                        await self._store_episode_summary(result.episode.uuid, summary)
-                        logger.info(f"Stored episode summary ({len(summary)} chars)")
+                    try:
+                        with posthog_user_context(
+                            request.userId, posthog_trace_id, request.sessionId
+                        ):
+                            summary = await asyncio.wait_for(
+                                self._summarize_episode(episode_content),
+                                timeout=SUMMARY_TIMEOUT_SECONDS,
+                            )
+                        if summary:
+                            await asyncio.wait_for(
+                                self._store_episode_summary(result.episode.uuid, summary),
+                                timeout=SUMMARY_STORE_TIMEOUT_SECONDS,
+                            )
+                            logger.info(f"Stored episode summary ({len(summary)} chars)")
+                    except Exception:
+                        logger.warning(
+                            "Optional episode summary failed; graph ingestion committed",
+                            exc_info=True,
+                        )
 
                 if self.hydration_changed is not None:
                     try:

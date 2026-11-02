@@ -115,6 +115,7 @@ async def lifespan(app: FastAPI):
             HydrationStore(neo4j_driver),
             HydrationCompiler(HydrationLLM(generation_client, settings.hydration_model)),
             hydration_service,
+            cache_manager=cache_manager,
         )
         await persisted.start()
         hydration_service.persisted = persisted

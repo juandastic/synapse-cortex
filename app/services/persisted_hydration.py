@@ -2,19 +2,32 @@
 
 import asyncio
 import logging
+import time
 
 from app.core.observability import anonymize_id
 from app.core.posthog import posthog_user_context
-from app.services.hydration_compiler import BATCH_CHARS, HydrationCompiler, sources_from_episodes
+from app.services.hydration_compiler import (
+    BATCH_CHARS,
+    COMPILER_VERSION,
+    HydrationCompiler,
+    WorkPending,
+    digest,
+    sources_from_episodes,
+)
 
 logger = logging.getLogger(__name__)
 
 
+class UnsupportedArchive(ValueError):
+    pass
+
+
 class PersistedHydration:
-    def __init__(self, store, compiler: HydrationCompiler, legacy):
+    def __init__(self, store, compiler: HydrationCompiler, legacy, cache_manager=None):
         self.store = store
         self.compiler = compiler
         self.legacy = legacy
+        self.cache_manager = cache_manager
         self._wake = asyncio.Event()
         self._task = None
 
@@ -31,14 +44,19 @@ class PersistedHydration:
                 pass
 
     async def changed(self, user, *, invalidate=False):
-        await self.store.request(user, invalidate=invalidate)
+        await self.store.request(user, invalidate=invalidate, source_changed=True)
+        if not invalidate:
+            # Ingestion can retire an old fact too. Validate dependencies once
+            # at write time, outside chat, before retaining the old snapshot.
+            await self.store.read(user)
         self._wake.set()
 
     async def read(self, user, *, strict=False):
         try:
             result = await self.store.read(user)
             if result is None:
-                await self.changed(user)
+                await self.store.request(user)
+                self._wake.set()
             return result
         except Exception:
             if strict:
@@ -46,10 +64,16 @@ class PersistedHydration:
             logger.exception("Persisted hydration unavailable; using legacy hydration")
             return None
 
-    async def _heartbeat(self, job):
+    async def _heartbeat(self, job, build_task, lost):
         while True:
             await asyncio.sleep(30)
-            await self.store.renew(job)
+            try:
+                if not await self.store.renew(job):
+                    lost.set()
+                    build_task.cancel()
+                    return
+            except Exception:
+                logger.warning("Hydration lease renewal failed; retrying", exc_info=True)
 
     async def build(self, job):
         user = job["user"]
@@ -89,20 +113,48 @@ class PersistedHydration:
                 len(candidates),
             )
             async with asyncio.TaskGroup() as group:
-                tasks = [group.create_task(extract_batch(batch)) for batch in batches]
+                tasks = [group.create_task(extract_batch(batch)) for batch in batches[:2]]
             for task in tasks:
                 candidates.extend(task.result())
-            selected = await self.compiler.select(candidates)
+            if len(batches) > 2:
+                raise WorkPending()
+            candidates = self.compiler.fact_candidates(candidates, edges)
+            previous = await self.store.current(user)
+            if previous and previous.get("compiler") != COMPILER_VERSION:
+                previous = None
+            hashes = {c["id"]: digest(c) for c in candidates}
+            lookup = {c["id"]: c for c in candidates}
+            if previous:
+                before = [c["id"] for c in previous.get("selected", []) if c["id"] in lookup]
+                changed = [
+                    c
+                    for c in candidates
+                    if previous.get("seen_hashes", {}).get(c["id"]) != hashes[c["id"]]
+                ]
+                wanted = set(before) | {c["id"] for c in changed}
+                pool = [c for c in candidates if c["id"] in wanted]
+                if not changed and before:
+                    selected = [lookup[cid] for cid in before]
+                else:
+                    selected = await self.compiler.select(
+                        pool, cache=self.store.selection_cache(job)
+                    )
+            else:
+                changed = candidates
+                selected = await self.compiler.select(
+                    candidates, cache=self.store.selection_cache(job)
+                )
+            # A correction cannot be silently outvoted by a larger old archive.
+            forced = [c for c in changed if c.get("correction")]
+            selected = list({c["id"]: c for c in forced + selected}.values())[:180]
         # Never replace a populated user's memory with an empty model response.
         if candidates and not selected:
             raise ValueError("No verifiable personal memory selected; keeping legacy hydration")
-        if sources and not candidates:
-            previous = await self.store.current(user)
-            if previous and previous["result"]["compilation_text"]:
-                raise ValueError("Empty extraction cannot replace an existing personal profile")
         stats = await self.legacy._fetch_graph_stats(user)
-        if not selected and (stats.entity_count or stats.relationship_count):
-            raise ValueError("Graph knowledge has no usable episodic evidence; preserving v2")
+        if not selected and (sources or stats.entity_count or stats.relationship_count):
+            raise UnsupportedArchive(
+                "Graph knowledge has no usable episodic evidence; preserving v2"
+            )
         result, retained = self.compiler.render(selected, edges, stats)
         if selected and not result.compilation_text:
             raise ValueError("Compilation budget omitted every selected claim")
@@ -110,28 +162,50 @@ class PersistedHydration:
             # Keep this job dirty. An old builder must not revoke a newer
             # publication if its lease was already reclaimed by another process.
             return False
+        result.seen_hashes = hashes
+        if self.cache_manager and result.compilation_text:
+            try:
+                name, _ = await asyncio.wait_for(
+                    self.cache_manager.create_compilation_cache(user, result.compilation_text),
+                    timeout=10,
+                )
+                result.provider_cache_name = name
+                result.provider_cache_model = self.cache_manager.model_name
+                result.provider_cache_expires_at = (
+                    time.time() + self.cache_manager.ttl_seconds if name else 0
+                )
+            except Exception:
+                logger.warning("Provider cache preparation failed; publication can be sent inline")
         return await self.store.publish(job, stamp, result, retained, episodes, edges)
 
     async def run_one(self, user=None):
         job = await self.store.claim(user=user) if user else await self.store.claim()
         if not job:
             return False
-        heartbeat = asyncio.create_task(self._heartbeat(job))
+        lost = asyncio.Event()
+        build_task = asyncio.create_task(asyncio.wait_for(self.build(job), timeout=300))
+        heartbeat = asyncio.create_task(self._heartbeat(job, build_task, lost))
         failed = False
+        terminal = False
         try:
-            await asyncio.wait_for(self.build(job), timeout=3600)
+            await build_task
+        except WorkPending:
+            pass
+        except UnsupportedArchive:
+            terminal = True
+            logger.info(
+                "No supported profile sources; preserving legacy hydration until memory changes"
+            )
         except asyncio.CancelledError:
-            raise
+            if not lost.is_set():
+                raise
         except Exception:
             failed = True
             logger.exception("Hydration compilation failed; work retained for retry")
         finally:
             heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
-            await self.store.release(job, failed=failed)
+            await asyncio.gather(heartbeat, return_exceptions=True)
+            await self.store.release(job, failed=failed, terminal=terminal)
         return True
 
     async def _run(self):

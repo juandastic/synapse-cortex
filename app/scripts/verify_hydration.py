@@ -26,7 +26,7 @@ from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.hydration import HydrationService
 from app.services.hydration_compiler import HydrationCompiler, HydrationLLM
-from app.services.hydration_store import HydrationStore
+from app.services.hydration_store import DELETE_HYDRATION_QUERY, HydrationStore
 from app.services.ingestion import IngestionService
 from app.services.job_store import create_job, get_job, remove_job
 from app.services.openrouter_generation import OpenRouterGenerationService
@@ -35,6 +35,7 @@ from app.services.persisted_hydration import PersistedHydration
 
 async def main(args):
     logging.basicConfig(level=logging.WARNING)
+    logging.getLogger("neo4j.notifications").setLevel(logging.ERROR)
     logging.getLogger("app.services.persisted_hydration").setLevel(logging.INFO)
     settings = Settings(_env_file=args.env_file)
     if urlsplit(settings.neo4j_uri).hostname not in {"localhost", "127.0.0.1", "::1"}:
@@ -62,6 +63,7 @@ async def main(args):
         graphiti, settings.graphiti_model, worker.changed
     )
     app.state.cache_manager = CacheManager(client, settings.chat_model, grounding_enabled=False)
+    worker.cache_manager = app.state.cache_manager
     app.state.graphiti = graphiti
     app.state.generation_service = GenerationService(client, grounding_enabled=False)
     app.state.openrouter_generation_service = OpenRouterGenerationService(
@@ -115,15 +117,23 @@ async def main(args):
             report["cold_fallback_ok"] = cold.json()["success"]
             # Manual drain proves durable state, without relying on an in-memory task.
             current = await store.read(user)
-            for attempt in range(3):
-                if current is not None:
-                    break
-                # This explicit local verification may retry immediately. Ordinary
-                # API reads preserve the durable worker's production backoff.
+            if current is None:
                 await worker.changed(user, invalidate=True)
-                assert await worker.run_one(user=user), "Another compiler holds this user's lease"
+            deadline = time.monotonic() + 2400
+            slices = 0
+            while current is None and time.monotonic() < deadline:
+                if not await worker.run_one(user=user):
+                    state = await store.rows(
+                        "MATCH (n:SynapseUserCore {user_id:$user}) RETURN "
+                        "n.hydration_failed_generation=n.hydration_generation AS failed",
+                        user=user,
+                    )
+                    assert not state or not state[0]["failed"], "Build exhausted retries"
+                    await asyncio.sleep(1)
+                else:
+                    slices += 1
                 current = await store.read(user)
-                report["build_attempts"] = attempt + 1
+            report["build_slices"] = slices
             current = await store.read(user)
             assert current is not None, "No compilation published"
             hydrated = await http.post(
@@ -160,7 +170,9 @@ async def main(args):
                         "provider": "vertex",
                         "model": settings.chat_model,
                         "system_instruction": "Responde breve en español. Usa la memoria, no inventes.",
-                        "compilation": cold.json()["userKnowledgeCompilation"],
+                        "compilation": body["userKnowledgeCompilation"],
+                        "compilationMetadata": body["compilationMetadata"],
+                        "cache_name": body.get("cacheName"),
                         "messages": [
                             {"role": "user", "content": "¿Quién es Martina y qué estudia mi prima?"}
                         ],
@@ -184,8 +196,7 @@ async def main(args):
         remove_job(job_id)
         if not args.user:
             await store.rows("MATCH (n {group_id:$user}) DETACH DELETE n", user=user)
-            for label in ["SynapseUserCore", "SynapseHydrationSource", "SynapseHydrationRevision"]:
-                await store.rows(f"MATCH (n:{label} {{user_id:$user}}) DETACH DELETE n", user=user)
+            await store.rows(DELETE_HYDRATION_QUERY, user=user)
         await app.state.openrouter_generation_service.close()
         await graphiti.close()
         if hasattr(graphiti.llm_client, "close"):

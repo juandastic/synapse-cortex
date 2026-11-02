@@ -42,6 +42,14 @@ class CacheManager:
         self._recent: dict[tuple[str, str], tuple[str, float]] = {}
         self._create_locks = WeakValueDictionary()
 
+    @property
+    def model_name(self):
+        return self._model
+
+    @property
+    def ttl_seconds(self):
+        return float(self._ttl.removesuffix("s"))
+
     async def create_compilation_cache(
         self,
         user_id: str,
@@ -77,7 +85,7 @@ class CacheManager:
             name, reason = await self._create_cache(user_id, compilation_text)
             if name:
                 # The configured lifecycle uses seconds; stop reusing before expiry.
-                ttl = max(0, float(self._ttl.removesuffix("s")) - 30)
+                ttl = max(0, self.ttl_seconds / 2)
                 self._recent[key] = (name, now + ttl)
             return name, reason
 

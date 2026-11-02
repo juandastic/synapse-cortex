@@ -79,11 +79,14 @@ def test_explicit_exclusions_and_technical_tests_are_not_compiled():
 
 async def test_current_text_still_updates_coverage_metadata():
     service = HydrationService(None)
-    service.persisted = SimpleNamespace(read=AsyncMock(return_value=published()))
+    service.persisted = SimpleNamespace(
+        store=SimpleNamespace(chat_read=AsyncMock(return_value=("updated", published())))
+    )
     request = ChatCompletionRequest(
         user_id="owner",
         messages=[],
         compilation="Current personal memory",
+        compilationMetadata=asdict(published().metadata),
         cache_name="cachedContents/same-text",
     )
     assert not await service.refresh_chat_compilation(request)
@@ -140,19 +143,20 @@ def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
             target_uuid="university",
         ),
     ]
-    result, retained = compiler.render([claim()], edges, GraphStats(2, 2))
+    candidates = compiler.fact_candidates([claim()], edges)
+    result, retained = compiler.render([candidates[0]], edges, GraphStats(2, 2))
     assert "Mi prima Julia" in result.compilation_text
     assert "2026-10-30" in result.compilation_text
     assert result.metadata.included_edge_ids == ["full"]
     assert result.metadata.included_node_ids == []
-    assert set(result.metadata.source_edge_ids) == {"full", "partial"}
+    assert set(result.metadata.source_edge_ids) == {"full"}
     assert result.metadata.source_node_ids == ["cousin", "university"]
     assert result.metadata.is_partial
     assert len(result.compilation_text) <= 1100
     assert len(retained) == 1
     # An omitted claim must never suppress its sources in RAG.
     empty, retained = HydrationCompiler(None, char_budget=10).render(
-        [claim()], edges, GraphStats(2, 2)
+        [candidates[0]], edges, GraphStats(2, 2)
     )
     assert empty.compilation_text == ""
     assert not empty.metadata.included_edge_ids
@@ -176,7 +180,7 @@ async def test_cold_read_enqueues_work_and_provider_failure_does_not_block_http(
     store = SimpleNamespace(read=AsyncMock(return_value=None), request=AsyncMock())
     service = PersistedHydration(store, None, None)
     assert await service.read("owner") is None
-    store.request.assert_awaited_once_with("owner", invalidate=False)
+    store.request.assert_awaited_once_with("owner")
     store.read.side_effect = RuntimeError("database unavailable")
     assert await service.read("owner") is None
 
@@ -191,11 +195,26 @@ async def test_completed_worker_reuses_unchanged_source_extraction_and_checks_re
     )
     store = SimpleNamespace(
         stamp=AsyncMock(return_value="stamp"),
-        snapshot=AsyncMock(return_value=([ep], [])),
+        snapshot=AsyncMock(
+            return_value=(
+                [ep],
+                [
+                    dict(
+                        uuid="claim",
+                        fact=claim()["quote"],
+                        episodes=["ep"],
+                        source_uuid="cousin",
+                        target_uuid="school",
+                    )
+                ],
+            )
+        ),
         cached_sources=AsyncMock(return_value={source.id: (source.hash, [claim()])}),
         prune_sources=AsyncMock(),
         save_sources=AsyncMock(),
         publish=AsyncMock(return_value=True),
+        current=AsyncMock(return_value=None),
+        selection_cache=lambda job: None,
     )
     legacy = SimpleNamespace(_fetch_graph_stats=AsyncMock(return_value=GraphStats(0, 0)))
     service = PersistedHydration(store, compiler, legacy)
@@ -218,6 +237,8 @@ async def test_graph_only_archive_keeps_legacy_memory_instead_of_publishing_empt
         cached_sources=AsyncMock(return_value={}),
         prune_sources=AsyncMock(),
         publish=AsyncMock(),
+        current=AsyncMock(return_value=None),
+        selection_cache=lambda job: None,
     )
     service = PersistedHydration(
         store,
@@ -235,7 +256,7 @@ async def test_worker_failure_keeps_durable_work_retryable_and_releases_lease():
     service = PersistedHydration(store, None, None)
     service.build = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
     assert await service.run_one()
-    store.release.assert_awaited_once_with(job, failed=True)
+    store.release.assert_awaited_once_with(job, failed=True, terminal=False)
 
 
 async def test_store_read_rejects_edited_or_deleted_episode_without_relying_on_size():
@@ -253,6 +274,7 @@ async def test_store_read_rejects_edited_or_deleted_episode_without_relying_on_s
     store.stamp = AsyncMock(return_value="stamp")
     store.rows = AsyncMock(return_value=[ep])
     store.request = AsyncMock()
+    store.discard = AsyncMock()
     assert await store.read("owner")
     store.rows.return_value = [dict(ep, content="modified")]
     assert await store.read("owner") is None
@@ -262,9 +284,15 @@ async def test_store_read_rejects_edited_or_deleted_episode_without_relying_on_s
 
 async def test_new_revision_refreshes_existing_session_without_leaking_old_cache():
     service = HydrationService(None)
-    service.persisted = SimpleNamespace(read=AsyncMock(return_value=published()))
+    service.persisted = SimpleNamespace(
+        store=SimpleNamespace(chat_read=AsyncMock(return_value=("updated", published())))
+    )
     request = ChatCompletionRequest(
-        user_id="owner", messages=[], compilation="old memory", cache_name="cachedContents/old"
+        user_id="owner",
+        messages=[],
+        compilation="old memory",
+        cache_name="cachedContents/old",
+        compilationMetadata=asdict(published().metadata),
     )
     assert await service.refresh_chat_compilation(request)
     assert request.compilation == "Current personal memory"
@@ -274,11 +302,14 @@ async def test_new_revision_refreshes_existing_session_without_leaking_old_cache
 
 async def test_transient_database_failure_preserves_existing_chat_memory():
     service = HydrationService(None)
-    service.persisted = SimpleNamespace(read=AsyncMock(side_effect=RuntimeError("offline")))
+    service.persisted = SimpleNamespace(
+        store=SimpleNamespace(chat_read=AsyncMock(side_effect=RuntimeError("offline")))
+    )
     request = ChatCompletionRequest(
         user_id="owner",
         messages=[],
         compilation="cached memory",
+        compilationMetadata=asdict(published().metadata),
         cache_name="cachedContents/active",
     )
     assert not await service.refresh_chat_compilation(request)
@@ -288,7 +319,9 @@ async def test_transient_database_failure_preserves_existing_chat_memory():
 
 async def test_revoked_snapshot_and_failed_fallback_still_allow_chat_without_stale_memory():
     service = HydrationService(None)
-    service.persisted = SimpleNamespace(read=AsyncMock(return_value=None))
+    service.persisted = SimpleNamespace(
+        store=SimpleNamespace(chat_read=AsyncMock(return_value=("revoked", None)))
+    )
     service.build_user_knowledge = AsyncMock(side_effect=RuntimeError("offline"))
     request = ChatCompletionRequest(
         user_id="owner",
@@ -304,7 +337,9 @@ async def test_revoked_snapshot_and_failed_fallback_still_allow_chat_without_sta
         cache_name="cachedContents/old",
     )
     assert await service.refresh_chat_compilation(request)
-    assert request.compilation is request.compilationMetadata is request.cache_name is None
+    assert request.compilation is request.cache_name is None
+    assert request.compilationMetadata.is_partial
+    service.build_user_knowledge.assert_not_awaited()
 
 
 async def test_real_hydrate_router_returns_published_text_coverage_and_legacy_contract(monkeypatch):

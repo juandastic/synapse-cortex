@@ -1838,44 +1838,60 @@ behavior. Explicit v1 requests always retain the original implementation.
 
 ```text
 episode + graph extraction -> episode summary attempted -> durable user job
-  -> extract attributed source quotes -> select by topic -> validate -> publish
+  -> verify source quotes -> select active graph facts by topic -> validate -> publish
 /hydrate -> published snapshot, or original v2 while the first build is pending
 ```
 
 The compiler uses `HYDRATION_MODEL=gemini-3-flash-preview` with the existing
 Google credentials, independently of the graph extraction model/provider. It
-selects literal user/document spans rather than generating an unsupported
-personal narrative. Original quotes retain third-party subjects, episode reference times
-and attribution. Interpretations remain attributed statements, not verified
-medical facts. Explicit do-not-store blocks and technical tests are omitted
-from this compilation; this does not retroactively delete their graph records.
+extracts literal user/document spans as episode context, then selects existing
+active graph facts. Published text copies those facts and temporal fields in full;
+old quotes cannot restore an invalidated relation. This preserves Graphiti's
+existing extraction quality and its limitations. It does not repair incorrect
+subjects already stored in the graph. Episode context is not a claim-level proof.
+Explicit do-not-store blocks and technical tests are omitted from source
+extraction; this does not retroactively delete their graph records. Correction
+episodes are attributed separately and retain clarifications containing "no recuerdes".
 
 Neo4j stores the current payload and leased work state in namespaced
 `hydration_*` properties on `SynapseUserCore`. `SynapseHydrationSource` caches
 verified extraction per source window and source hash. Audit revisions contain
-claim IDs/hashes, not old copies of personal text. None of these records are
+claim IDs/hashes, not old copies of personal text, with at most 20 revisions per user.
+`SynapseHydrationSelection` caches selection IDs, capped at 100 entries after publication.
+None of these records are
 Graphiti `Entity` or `Episodic` nodes. The original graph remains unchanged.
 
-One worker per API process leases a user, with two bounded extraction calls in
-parallel. Pending jobs survive restarts; expired leases can be reclaimed.
-Failures retain retryable work and v2 remains available. Initial construction
-can take minutes for large archives. New versions reuse unchanged extraction;
-they reselect the resident context so recent goals can replace older ones.
-The API also checks for publication on chat requests, so existing sessions can
-use it before Convex refreshes its stored copy. No LLM compilation runs in the
-hydrate or chat request path. Provider-cache renewal uses the stored text.
+One worker per API process leases a user. Each slice performs at most two parallel
+extraction calls and two uncached selection calls, with a five-minute limit.
+Progress survives restarts, and the worker yields between slices to serve other
+users. Expired leases can be reclaimed. Failures retry with exponential backoff
+from 30 seconds, stopping after five failures per generation. Unsupported archives
+stop immediately; new ingestion or correction reactivates them. V2 remains available.
+Initial construction can take minutes for large archives. Later versions select
+from the previous resident context plus changed candidates, reusing extraction
+and reduction decisions. Additive changes keep serving the prepared version.
 
-Coverage is conservative. `included_edge_ids` contains only complete verbatim
-facts whose temporal dates are also represented. `included_node_ids` is empty
+Chat refresh requires both existing compilation text and v2 metadata. It reads
+one indexed revision record with a 250 ms timeout and preserves the client's
+memory if that lookup fails. It does not scan the archive, rebuild v2, or create
+a provider cache. The worker prepares a cache before publication when possible;
+`/hydrate` can also create or renew one using stored text. Argon does not use
+explicit caches. Convex's existing cache remains a transport copy.
+
+Coverage tracks the full graph facts actually rendered. `included_edge_ids`
+contains their original UUIDs, including facts paraphrased by Graphiti, with
+temporal fields copied alongside the text. `included_node_ids` is empty
 for partially summarized entities. `source_node_ids`, `source_edge_ids` and
 `included_episode_ids` retain source lineage; they do not authorize excluding
 all details of an entity/episode. `is_partial` remains true. GraphRAG overfetches
 before deduplication and injects at most ten new edges and ten new nodes.
 
-Source stamps, selected episode hashes and covered-fact hashes invalidate stale
-payloads. Graph Explorer and Notion corrections also invalidate explicitly.
+Source stamps detect additions. Selected episode hashes and covered-fact hashes
+revoke destructive changes without incrementing a running builder's generation.
+Ingestion validates these dependencies before retaining an older snapshot.
+Graph Explorer and Notion corrections also revoke explicitly.
 Revoked published text/cache IDs are replaced on the next chat request. The
-existing Convex cache is still a transport copy, not the compilation authority.
+Cleanup tools remove the derived labels as well as Graphiti's `group_id` records.
 
 Run `make verify` for offline contracts and failure recovery. The explicit
 integration script permits only loopback Neo4j and uses real providers:
@@ -1886,6 +1902,8 @@ python -m app.scripts.verify_hydration --env-file /path/to/local.env
 # Synthetic data is removed in finally.
 python -m app.scripts.verify_hydration --env-file /path/to/local.env --user USER_ID
 # Compiles an existing local user; only derived hydration nodes are written.
+python -m app.scripts.verify_hydration_store --env-file /path/to/local.env
+# Real Neo4j read/build race, revocation, leases, selection cache and backoff.
 ```
 
 This extractive release establishes persistence, lifecycle and traceable
