@@ -102,7 +102,12 @@ class PersistedHydration:
         if previous.get("compiler") != COMPILER_VERSION:
             previous = {}
         seen_hashes = {c["id"]: digest(c) for c in candidates}
-        sections = previous.get("fact_sections", {})
+        current_ids = {c["id"] for c in candidates}
+        sections = {
+            cid: title
+            for cid, title in previous.get("fact_sections", {}).items()
+            if cid in current_ids
+        }
         pending = []
         grouped = {}
         for candidate in candidates:
@@ -116,7 +121,13 @@ class PersistedHydration:
                     and not candidate.get("correction"),
                 }
             else:
-                pending.append(candidate)
+                pending.append(
+                    {
+                        **candidate,
+                        "classification_retry": previous.get("seen_hashes", {}).get(cid)
+                        == seen_hashes[cid],
+                    }
+                )
         if pending:
             classified = await self.compiler.group(
                 pending,
@@ -131,7 +142,14 @@ class PersistedHydration:
         if candidates and not grouped:
             raise ValueError("Grouping omitted every available fact; preserving legacy hydration")
         stats = await self.hydration_service.fetch_graph_stats(user)
-        if not grouped and (sources or stats.entity_count or stats.relationship_count):
+        all_sources_excluded = (
+            not grouped and bool(sources) and all(source.excluded for source in sources)
+        )
+        if (
+            not grouped
+            and not all_sources_excluded
+            and (sources or stats.entity_count or stats.relationship_count)
+        ):
             raise UnsupportedArchive(
                 "Graph knowledge has no usable episodic evidence; preserving v2"
             )

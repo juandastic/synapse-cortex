@@ -277,7 +277,14 @@ class HydrationStore:
                 "stamp": stamp,
                 "result": asdict(result),
                 "source_hashes": hashes,
-                "selected": selected,
+                "selected": [
+                    {
+                        k: v
+                        for k, v in fact.items()
+                        if k not in {"excluded_context", "classification_retry"}
+                    }
+                    for fact in selected
+                ],
                 "seen_hashes": seen_hashes,
                 "fact_sections": fact_sections,
                 "edge_hashes": {

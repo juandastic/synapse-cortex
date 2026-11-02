@@ -13,11 +13,12 @@ from pydantic import BaseModel, Field
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 
 COMPILER_VERSION = "grouped-facts-1"
-GROUP_CACHE_VERSION = "grouping-3"
+GROUP_CACHE_VERSION = "grouping-4"
 EXCLUDED_SECTION = "__excluded_test_or_no_store__"
 CHAR_BUDGET = 120_000  # Same context ceiling as classic hydration v2, not a compression target.
 BATCH_CHARS = 30_000
 BATCH_FACTS = 100
+GROUP_BUCKETS = 16
 LLM_TIMEOUT_SECONDS = 90
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,38 @@ class Source:
     excluded: bool = False
 
 
+def excluded_source(text: str) -> bool:
+    # Direct memory opt-outs and explicit app/model test protocols only.
+    # A job interview, medical test or quoted advice must remain personal data.
+    if re.match(
+        r"^\s*(?:por favor[, :]?\s+)?(?:no (?:guardes|recuerdes) (?:este mensaje|"
+        r"esto(?=\s*(?:[.!?:]|$))|esto como dato personal|esto en (?:tu )?memoria)|"
+        r"do not (?:store|save|remember) this(?: message|(?=\s*(?:[.!?:]|$))))",
+        text,
+        re.I,
+    ):
+        return True
+    if re.match(
+        r"^\s*(?:prueba t[eé]cnica de integraci[oó]n|"
+        r"(?:m[oó]viles|mobile)\s+(?:GPT|Claude|Gemini)\s+test|"
+        r"prueba d(?:e)? subida d(?:e)? imagen|prueba de conexi[oó]n del entorno de desarrollo)",
+        text,
+        re.I,
+    ):
+        return True
+    return bool(
+        re.match(r"^\s*(?:prueba|web test|technical test|integration test)", text, re.I)
+        and re.search(r"\b(?:Synapse|Cortex|Qwen|GPT|Claude|Gemini|ORBIT-\d+)\b", text, re.I)
+        and re.search(
+            r"\b(?:reply (?:only|exactly)|respond (?:only|exactly)|"
+            r"responde (?:solo|solamente|únicamente)|remember the code|recall the code|"
+            r"recuerda (?:el código|ORBIT-\d+))\b",
+            text,
+            re.I,
+        )
+    )
+
+
 def sources_from_episodes(episodes: list[dict]) -> list[Source]:
     sources = []
     for ep in episodes:
@@ -109,19 +142,7 @@ def sources_from_episodes(episodes: list[dict]) -> list[Source]:
         else:
             continue
         for index, text in enumerate(texts):
-            excluded = attribution != "corrección del usuario" and bool(
-                re.search(
-                    r"^\s*(?:no (?:guardes|recuerdes)|do not (?:store|save|remember) this|"
-                    r"prueba t[eé]cnica|technical test|integration test|web test|"
-                    r"(?:m[oó]viles|mobile)\s+(?:GPT|Claude|Gemini)\s+test|"
-                    r"prueba d(?:e)? subida d(?:e)? imagen|"
-                    r"prueba de (?:copiar|conexi[oó]n|visi[oó]n))\b|"
-                    r"\b(?:no (?:guardes|recuerdes) (?:este mensaje|esto)|"
-                    r"do not (?:store|save|remember) this)\b",
-                    text,
-                    re.I,
-                )
-            )
+            excluded = attribution != "corrección del usuario" and excluded_source(text)
             # Windows bound parsing work without selecting or dropping user details.
             for offset in range(0, len(text), 14_000):
                 chunk = text[max(0, offset - 300) : offset + 14_000]
@@ -206,11 +227,34 @@ class HydrationCompiler:
         self, candidates: list[dict], cache=None, existing_groups=(), retry_epoch=None
     ) -> list[dict]:
         """Page through every fact. Missing classifications never remove a fact."""
-        grouped, batch, size = [], [], 0
+        grouped = []
         groups = list(dict.fromkeys(g for g in existing_groups if g != EXCLUDED_SECTION))
-        for candidate in sorted(candidates, key=lambda c: (c["date"], c["id"])):
-            cost = len(json.dumps(candidate))
-            if batch and (size + cost > BATCH_CHARS or len(batch) >= BATCH_FACTS):
+        buckets = {}
+        for candidate in sorted(candidates, key=lambda c: c["id"]):
+            bucket = int(digest(candidate["id"])[:8], 16) % GROUP_BUCKETS
+            buckets.setdefault(bucket, []).append(candidate)
+        # Membership is stable when unrelated facts are removed or change dates.
+        for bucket in sorted(buckets):
+            batch, size = [], 0
+            for candidate in buckets[bucket]:
+                cost = len(json.dumps(candidate))
+                if batch and (size + cost > BATCH_CHARS or len(batch) >= BATCH_FACTS):
+                    result = await self._group_batch(batch, groups, cache, retry_epoch)
+                    grouped.extend(result)
+                    groups = list(
+                        dict.fromkeys(
+                            groups
+                            + [
+                                c["fact_section"]
+                                for c in result
+                                if not c["classification_fallback"] and not c["excluded"]
+                            ]
+                        )
+                    )
+                    batch, size = [], 0
+                batch.append(candidate)
+                size += cost
+            if batch:
                 result = await self._group_batch(batch, groups, cache, retry_epoch)
                 grouped.extend(result)
                 groups = list(
@@ -223,11 +267,6 @@ class HydrationCompiler:
                         ]
                     )
                 )
-                batch, size = [], 0
-            batch.append(candidate)
-            size += cost
-        if batch:
-            grouped.extend(await self._group_batch(batch, groups, cache, retry_epoch))
         return grouped
 
     async def _group_batch(self, candidates, existing_groups, cache, retry_epoch):
@@ -241,7 +280,9 @@ class HydrationCompiler:
             }
             for c in candidates
         ]
-        key = digest([GROUP_CACHE_VERSION, facts, existing_groups, retry_epoch])
+        # Headings are hints, not dependencies of the cached fact classification.
+        retry = retry_epoch if any(c.get("classification_retry") for c in candidates) else None
+        key = digest([GROUP_CACHE_VERSION, facts, retry])
         can_exclude = {
             c["id"] for c in candidates if c.get("excluded_context") and not c.get("correction")
         }
@@ -327,33 +368,26 @@ class HydrationCompiler:
             key=lambda c: (bool(c.get("correction")), c["date"] if c["date"] != "unknown" else ""),
             reverse=True,
         )
-        queues = {}
+        lines = {}
+        remaining = self.char_budget - len(header) + 1
+        retained = []
+        # Apply the global priority before presentation groups can affect the budget.
         for candidate in grouped:
             section = normalize(candidate.get("fact_section") or "")[:80] or (
                 "Correcciones del usuario" if candidate.get("correction") else "Otros recuerdos"
             )
-            queues.setdefault(section, []).append({**candidate, "fact_section": section})
-        lines = {section: [] for section in queues}
-        remaining = self.char_budget - len(header) + 1
-        retained = []
-        while any(queues.values()):
-            for section, queue in queues.items():
-                if not queue:
-                    continue
-                c = queue.pop(0)
-                line = f"- [{c['date']}; conversación/documento] {normalize(c['quote'])}"
-                if c.get("valid_at"):
-                    line += f" [desde {c['valid_at']}]"
-                if c.get("invalid_at"):
-                    line += f" [hasta {c['invalid_at']}]"
-                cost = len(line) + 1 + (len(section) + 2 if not lines[section] else 0)
-                if cost <= remaining:
-                    remaining -= cost
-                    lines[section].append(line)
-                    retained.append(c)
-        sections = [
-            section + "\n" + "\n".join(lines[section]) for section in queues if lines[section]
-        ]
+            c = {**candidate, "fact_section": section}
+            line = f"- [{c['date']}; conversación/documento] {normalize(c['quote'])}"
+            if c.get("valid_at"):
+                line += f" [desde {c['valid_at']}]"
+            if c.get("invalid_at"):
+                line += f" [hasta {c['invalid_at']}]"
+            cost = len(line) + 1 + (len(section) + 2 if section not in lines else 0)
+            if cost <= remaining:
+                remaining -= cost
+                lines.setdefault(section, []).append(line)
+                retained.append(c)
+        sections = [section + "\n" + "\n".join(lines[section]) for section in lines]
         text = header + "\n" + "\n\n".join(sections) if retained else ""
         covered = list(
             dict.fromkeys(
