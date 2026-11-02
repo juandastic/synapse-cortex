@@ -114,13 +114,16 @@ async def main(args):
             cold.raise_for_status()
             report["cold_fallback_ok"] = cold.json()["success"]
             # Manual drain proves durable state, without relying on an in-memory task.
+            current = await store.read(user)
             for attempt in range(3):
-                await worker.changed(user)
-                await worker.run_one(user=user)
-                current = await store.read(user)
                 if current is not None:
-                    report["build_attempts"] = attempt + 1
                     break
+                # This explicit local verification may retry immediately. Ordinary
+                # API reads preserve the durable worker's production backoff.
+                await worker.changed(user, invalidate=True)
+                assert await worker.run_one(user=user), "Another compiler holds this user's lease"
+                current = await store.read(user)
+                report["build_attempts"] = attempt + 1
             current = await store.read(user)
             assert current is not None, "No compilation published"
             hydrated = await http.post(

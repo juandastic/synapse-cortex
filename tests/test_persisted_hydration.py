@@ -211,6 +211,24 @@ async def test_completed_worker_reuses_unchanged_source_extraction_and_checks_re
     store.request.assert_not_awaited()
 
 
+async def test_graph_only_archive_keeps_legacy_memory_instead_of_publishing_empty_profile():
+    store = SimpleNamespace(
+        stamp=AsyncMock(return_value="stamp"),
+        snapshot=AsyncMock(return_value=([], [])),
+        cached_sources=AsyncMock(return_value={}),
+        prune_sources=AsyncMock(),
+        publish=AsyncMock(),
+    )
+    service = PersistedHydration(
+        store,
+        HydrationCompiler(None),
+        SimpleNamespace(_fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1))),
+    )
+    with pytest.raises(ValueError, match="preserving v2"):
+        await service.build(dict(user="owner", token="lease", generation=1))
+    store.publish.assert_not_awaited()
+
+
 async def test_worker_failure_keeps_durable_work_retryable_and_releases_lease():
     job = dict(user="owner", token="lease", generation=2)
     store = SimpleNamespace(claim=AsyncMock(return_value=job), release=AsyncMock())

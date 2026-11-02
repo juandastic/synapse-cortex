@@ -101,6 +101,8 @@ class PersistedHydration:
             if previous and previous["result"]["compilation_text"]:
                 raise ValueError("Empty extraction cannot replace an existing personal profile")
         stats = await self.legacy._fetch_graph_stats(user)
+        if not selected and (stats.entity_count or stats.relationship_count):
+            raise ValueError("Graph knowledge has no usable episodic evidence; preserving v2")
         result, retained = self.compiler.render(selected, edges, stats)
         if selected and not result.compilation_text:
             raise ValueError("Compilation budget omitted every selected claim")
