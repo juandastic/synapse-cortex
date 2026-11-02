@@ -18,6 +18,8 @@ ACTIVE = """r.expired_at IS NULL AND
 FIELDS = """r.uuid AS uuid,r.fact AS fact,
     toString(r.valid_at) AS valid_at,toString(r.invalid_at) AS invalid_at,
     a.uuid AS source_uuid,b.uuid AS target_uuid"""
+CORRECTION = """EXISTS {MATCH (c:Episodic {group_id:$user})
+    WHERE c.source='text' AND c.name IN $names AND c.uuid IN r.episodes}"""
 HEAD_QUERY = """
 MATCH (e:Episodic {group_id:$user})
 WITH e ORDER BY e.created_at DESC,e.uuid DESC LIMIT 1
@@ -33,8 +35,10 @@ MATCH (a)-[r:RELATES_TO {uuid:id}]->(b)
 WHERE r.group_id=$user AND a.group_id=$user AND b.group_id=$user AND """
     + ACTIVE
     + """
-WITH a,b,r,max(toString(e.valid_at)) AS date,collect(DISTINCT e.uuid) AS episode_ids,
-     max(CASE WHEN e.source='text' AND e.name IN $names THEN 1 ELSE 0 END)=1 AS correction
+WITH a,b,r,max(toString(e.valid_at)) AS date,collect(DISTINCT e.uuid) AS episode_ids
+WITH a,b,r,date,episode_ids,"""
+    + CORRECTION
+    + """ AS correction
 ORDER BY correction DESC,date DESC,r.uuid LIMIT $fact_limit
 RETURN """
     + FIELDS
@@ -51,8 +55,9 @@ WITH a,b,r ORDER BY r.created_at DESC,r.uuid LIMIT $limit
 RETURN """
     + FIELDS
     + """,toString(r.created_at) AS date,[] AS episode_ids,
-EXISTS {MATCH (c:Episodic {group_id:$user})
-        WHERE c.source='text' AND c.name IN $names AND c.uuid IN r.episodes} AS correction
+"""
+    + CORRECTION
+    + """ AS correction
 """
 )
 HUB_QUERY = (
@@ -72,8 +77,9 @@ CALL {
     RETURN collect({uuid:r.uuid,fact:r.fact,valid_at:toString(r.valid_at),
         invalid_at:toString(r.invalid_at),date:toString(r.created_at),episode_ids:[],
         source_uuid:startNode(r).uuid,target_uuid:endNode(r).uuid,
-        correction:EXISTS {MATCH (c:Episodic {group_id:$user})
-            WHERE c.source='text' AND c.name IN $names AND c.uuid IN r.episodes}}) AS facts
+        correction:"""
+    + CORRECTION
+    + """}) AS facts
 }
 WITH n,degree,facts WHERE size(facts)>0
 ORDER BY degree DESC,n.uuid LIMIT $hubs

@@ -33,7 +33,7 @@ def setup(edges=None):
         publish=AsyncMock(return_value=True),
     )
     llm = SimpleNamespace(generate_response=AsyncMock(return_value={"groups": [], "records": []}))
-    service = PersistedHydration(store, HydrationCompiler(llm), None)
+    service = PersistedHydration(store, HydrationCompiler(llm))
     return (service, store, llm)
 
 

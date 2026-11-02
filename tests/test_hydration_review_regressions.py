@@ -92,7 +92,7 @@ async def test_argon_refresh_never_uses_the_prepared_explicit_cache():
 async def test_unsupported_archive_becomes_terminal_until_memory_changes():
     job = dict(user="owner", token="lease", generation=1)
     store = SimpleNamespace(claim=AsyncMock(return_value=job), release=AsyncMock())
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     service.build = AsyncMock(side_effect=UnsupportedArchive())
     assert await service.run_one()
     store.release.assert_awaited_once_with(job, failed=False, terminal=True)
@@ -115,7 +115,7 @@ async def test_heartbeat_survives_one_transient_database_failure(monkeypatch):
         return True
 
     monkeypatch.setattr(asyncio, "sleep", fast_sleep)
-    service = PersistedHydration(SimpleNamespace(renew=renew), None, None)
+    service = PersistedHydration(SimpleNamespace(renew=renew), None)
     build = asyncio.create_task(asyncio.Event().wait())
     lost = asyncio.Event()
     heartbeat = asyncio.create_task(service._heartbeat({}, build, lost))

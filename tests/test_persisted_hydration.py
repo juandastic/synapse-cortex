@@ -96,7 +96,7 @@ async def test_hydration_reads_publication_and_preserves_v1_and_cold_v2_fallback
 
 async def test_cold_read_enqueues_work_and_provider_failure_does_not_block_http():
     store = SimpleNamespace(read=AsyncMock(return_value=None), request=AsyncMock())
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     assert await service.read("owner") is None
     store.request.assert_awaited_once_with("owner")
     store.read.side_effect = RuntimeError("database unavailable")
@@ -108,7 +108,7 @@ async def test_old_compilation_format_enqueues_rebuild_without_parsing_retired_p
     store.current = AsyncMock(return_value={"compiler": "older-format", "result": {}})
     store.request = AsyncMock()
     store.stamp = AsyncMock()
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     assert await service.read("owner") is None
     store.request.assert_awaited_once_with("owner")
     store.stamp.assert_not_awaited()
@@ -117,7 +117,7 @@ async def test_old_compilation_format_enqueues_rebuild_without_parsing_retired_p
 async def test_worker_failure_keeps_durable_work_retryable_and_releases_lease():
     job = dict(user="owner", token="lease", generation=2)
     store = SimpleNamespace(claim=AsyncMock(return_value=job), release=AsyncMock())
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     service.build = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
     assert await service.run_one()
     store.release.assert_awaited_once_with(job, failed=True, terminal=False)

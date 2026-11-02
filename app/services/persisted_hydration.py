@@ -20,10 +20,9 @@ class UnsupportedArchive(ValueError):
 
 
 class PersistedHydration:
-    def __init__(self, store, compiler: HydrationCompiler, hydration_service, cache_manager=None):
+    def __init__(self, store, compiler: HydrationCompiler, cache_manager=None):
         self.store = store
         self.compiler = compiler
-        self.hydration_service = hydration_service
         self.cache_manager = cache_manager
         self._wake = asyncio.Event()
         self._task = None

@@ -112,7 +112,7 @@ async def organize(facts, llm):
             },
             Organization,
             "hydration.organize",
-            8192,
+            16384,
         )
     except Exception:
         logger.warning(
