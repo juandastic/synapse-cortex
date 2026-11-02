@@ -103,7 +103,9 @@ async def main(args):
                 metadata=dict(sessionStartedAt=now, sessionEndedAt=now, messageCount=1),
             )
             create_job(job_id, user, job_id)
-            await app.state.ingestion_service._process_background(job_id, request)
+            await asyncio.wait_for(
+                app.state.ingestion_service._process_background(job_id, request), timeout=600
+            )
             assert get_job(job_id).status == "completed", get_job(job_id).error
             report["ingestion_completed"] = True
 
@@ -161,7 +163,11 @@ async def main(args):
             )
             if not args.user:
                 assert "sobrina" in current.compilation_text
-                assert "prima Julia" in current.compilation_text
+                assert "Julia" in current.compilation_text
+                assert any(word in current.compilation_text.lower() for word in ("prima", "cousin"))
+                assert any(
+                    word in current.compilation_text.lower() for word in ("ingenier", "engineer")
+                )
                 chat = await http.post(
                     "/v1/chat/completions",
                     headers=headers,
@@ -174,7 +180,10 @@ async def main(args):
                         "compilationMetadata": body["compilationMetadata"],
                         "cache_name": body.get("cacheName"),
                         "messages": [
-                            {"role": "user", "content": "¿Quién es Martina y qué estudia mi prima?"}
+                            {
+                                "role": "user",
+                                "content": "¿Quiénes son Martina y Julia para mí, y qué estudia Julia?",
+                            }
                         ],
                     },
                 )
@@ -187,7 +196,9 @@ async def main(args):
                     if line.startswith("data: {") and json.loads(line[6:]).get("choices")
                 )
                 report["chat_answer"] = content
-                assert "sobrina" in content.lower() and "ingenier" in content.lower(), content
+                assert all(word in content.lower() for word in ("sobrina", "prima", "ingenier")), (
+                    content
+                )
             if args.output:
                 Path(args.output).write_text(body["userKnowledgeCompilation"])
             report["seconds"] = round(time.monotonic() - started, 2)

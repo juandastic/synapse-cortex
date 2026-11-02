@@ -79,12 +79,13 @@ class HydrationStore:
         SET n.hydration_lock = coalesce(n.hydration_lock,0)+1
         WITH n, $invalidate OR $source_changed AS fresh
         SET n.hydration_generation = CASE WHEN fresh
-            THEN coalesce(n.hydration_generation,0)+1 ELSE n.hydration_generation END,
+            THEN coalesce(n.hydration_generation,0)+1 ELSE coalesce(n.hydration_generation,0) END,
             n.hydration_dirty = true,
             n.hydration_retry_at = CASE WHEN fresh THEN 0 ELSE coalesce(n.hydration_retry_at,0) END,
             n.hydration_attempts=CASE WHEN fresh THEN 0 ELSE coalesce(n.hydration_attempts,0) END,
             n.hydration_failed_generation=CASE WHEN fresh THEN null ELSE n.hydration_failed_generation END,
             n.hydration_payload = CASE WHEN $invalidate THEN null ELSE n.hydration_payload END
+        SET n.hydration_result = CASE WHEN $invalidate THEN null ELSE n.hydration_result END
         """,
             user=user,
             invalidate=invalidate,
@@ -98,7 +99,7 @@ class HydrationStore:
             """MATCH (n:SynapseUserCore {user_id:$user})
             SET n.hydration_lock=coalesce(n.hydration_lock,0)+1
             WITH n WHERE n.hydration_revision=$revision
-            SET n.hydration_payload=null,n.hydration_dirty=true""",
+            SET n.hydration_payload=null,n.hydration_result=null,n.hydration_dirty=true""",
             user=user,
             revision=revision,
         )
@@ -117,9 +118,10 @@ class HydrationStore:
     async def chat_read(self, user, revision):
         rows = await self.rows(
             """MATCH (n:SynapseUserCore {user_id:$user})
-            RETURN n.hydration_revision AS revision,n.hydration_payload IS NOT NULL AS available,
+            RETURN n.hydration_revision AS revision,n.hydration_result IS NOT NULL AS available,
             CASE WHEN $revision IS NULL OR n.hydration_revision<>$revision
-                THEN n.hydration_payload ELSE null END AS payload,
+                THEN n.hydration_result ELSE null END AS payload,
+            n.hydration_compiler AS compiler,
             n.hydration_cache_name AS cache_name,n.hydration_cache_model AS cache_model,
             n.hydration_cache_expires_at AS cache_expires
             """,
@@ -133,10 +135,9 @@ class HydrationStore:
         row = rows[0]
         if row["revision"] == revision:
             return "unchanged", None
-        payload = json.loads(row["payload"])
-        if payload["compiler"] != COMPILER_VERSION:
+        if row.get("compiler") != COMPILER_VERSION:
             return "unchanged", None
-        result = self.result(payload)
+        result = self.result({"result": json.loads(row["payload"])})
         result.provider_cache_name = row.get("cache_name")
         result.provider_cache_model = row.get("cache_model")
         result.provider_cache_expires_at = row.get("cache_expires") or 0
@@ -251,7 +252,8 @@ class HydrationStore:
             SET n.hydration_lease_until=0, n.hydration_owner=null,
                 n.hydration_retry_at=CASE WHEN n.hydration_generation=$generation
                     THEN timestamp()+$delay ELSE n.hydration_retry_at END,
-                n.hydration_attempts=CASE WHEN n.hydration_generation=$generation
+                n.hydration_attempts=CASE WHEN n.hydration_dirty=false THEN 0
+                    WHEN n.hydration_generation=$generation
                     THEN $next_attempts ELSE n.hydration_attempts END,
                 n.hydration_failed_generation=CASE
                     WHEN n.hydration_generation=$generation AND ($terminal OR $next_attempts>=5)
@@ -276,7 +278,7 @@ class HydrationStore:
         )
         return {r["source_id"]: (r["hash"], json.loads(r["items"])) for r in rows}
 
-    async def save_sources(self, job, sources, items):
+    async def save_sources(self, job, sources, items, *, quarantine_reason=None):
         user = job["user"]
         records = [
             {
@@ -295,11 +297,13 @@ class HydrationStore:
             WITH n WHERE n.hydration_generation=$generation AND n.hydration_lease_until>timestamp()
             UNWIND $records AS r
             MERGE (s:SynapseHydrationSource {key:r.key})
-            SET s.user_id=$user,s.source_id=r.id,s.source_hash=r.hash,s.items=r.items
+            SET s.user_id=$user,s.source_id=r.id,s.source_hash=r.hash,s.items=r.items,
+                s.quarantine_reason=$quarantine_reason
             RETURN count(s) AS saved
             """,
             **job,
             records=records,
+            quarantine_reason=quarantine_reason,
         )
         if not rows or rows[0]["saved"] != len(records):
             raise RuntimeError("Hydration source writer lost its lease or revision")
@@ -349,6 +353,7 @@ class HydrationStore:
         WITH n WHERE n.hydration_generation=$generation
           AND n.hydration_lease_until>timestamp()
         SET n.hydration_payload=$payload,n.hydration_dirty=false,
+            n.hydration_result=$result,n.hydration_compiler=$compiler,
             n.hydration_revision=$revision,n.hydration_updated_at=datetime(),
             n.hydration_attempts=0,n.hydration_failed_generation=null,
             n.hydration_cache_name=$cache_name,n.hydration_cache_model=$cache_model,
@@ -360,6 +365,8 @@ class HydrationStore:
             **job,
             revision=revision,
             payload=payload,
+            result=json.dumps(asdict(result), ensure_ascii=False),
+            compiler=COMPILER_VERSION,
             stamp=stamp,
             claim_ids=[c["id"] for c in selected],
             hash=digest(result.compilation_text),
@@ -399,27 +406,30 @@ class SelectionCache:
     async def load(self, fingerprint):
         rows = await self.store.rows(
             """MATCH (n:SynapseHydrationSelection {key:$key})
-            RETURN n.ids AS ids""",
+            RETURN n.ids AS ids,n.sections AS sections""",
             key=digest([self.job["user"], fingerprint]),
         )
         if rows:
+            if rows[0].get("sections"):
+                return {"ids": rows[0]["ids"], "sections": json.loads(rows[0]["sections"])}
             return rows[0]["ids"]
         if self.calls >= 2:
             raise WorkPending()
         self.calls += 1
         return None
 
-    async def save(self, fingerprint, ids):
+    async def save(self, fingerprint, ids, *, sections=None):
         rows = await self.store.rows(
             """MATCH (n:SynapseUserCore {user_id:$user,hydration_owner:$token})
             SET n.hydration_lock=coalesce(n.hydration_lock,0)+1
             WITH n WHERE n.hydration_generation=$generation AND n.hydration_lease_until>timestamp()
             MERGE (s:SynapseHydrationSelection {key:$key})
-            SET s.user_id=$user,s.ids=$ids,s.created_at=datetime()
+            SET s.user_id=$user,s.ids=$ids,s.sections=$sections,s.created_at=datetime()
             RETURN s.key AS key""",
             **self.job,
             key=digest([self.job["user"], fingerprint]),
             ids=ids,
+            sections=json.dumps(sections or {}),
         )
         if not rows:
             raise RuntimeError("Hydration selector lost its lease or revision")

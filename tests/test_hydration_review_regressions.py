@@ -6,16 +6,19 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.schemas.models import ChatCompletionRequest, ChatMessage
+from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.hydration_compiler import (
     COMPILER_VERSION,
     HydrationCompiler,
+    UnverifiableEvidence,
     WorkPending,
     digest,
     sources_from_episodes,
 )
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.hydration_store import HydrationStore, SelectionCache
+from app.services.notion_correction import CorrectionItem, NotionCorrectionService
 from app.services.persisted_hydration import PersistedHydration, UnsupportedArchive
 
 
@@ -295,3 +298,67 @@ async def test_heartbeat_survives_one_transient_database_failure(monkeypatch):
         heartbeat.cancel()
         build.cancel()
         await asyncio.gather(heartbeat, build, return_exceptions=True)
+
+
+async def test_render_uses_fact_classification_and_never_inherits_unrelated_user_labels():
+    quote = dict(
+        evidence(text="Prefiero respuestas breves."),
+        section="Preferencias de interacción",
+        kind="preferencia",
+    )
+    compiler = HydrationCompiler(
+        SimpleNamespace(
+            generate_response=AsyncMock(
+                return_value={
+                    "ids": ["medication"],
+                    "sections": {"medication": "Situación reciente"},
+                }
+            )
+        )
+    )
+    facts = [edge("medication", "La prima toma el medicamento X")]
+    selected = await compiler.select(compiler.fact_candidates([quote], facts))
+    result, _ = compiler.render(selected, facts, GraphStats(2, 1))
+    assert "Situación reciente" in result.compilation_text
+    assert "Preferencias de interacción" not in result.compilation_text
+    assert "; usuario;" not in result.compilation_text
+    assert "; preferencia;" not in result.compilation_text
+    assert "conversación/documento" in result.compilation_text
+    # No classifier result is safer than borrowing the episode's label.
+    selected[0].pop("fact_section")
+    unclassified, _ = compiler.render(selected, facts, GraphStats(2, 1))
+    assert "Registros sin clasificar" in unclassified.compilation_text
+
+
+async def test_poison_extraction_is_quarantined_and_yields_without_blocking_other_batches():
+    ep = dict(uuid="a", source="message", valid_at="2026-11-01", content="User: Vivo en Bogotá.")
+    source = sources_from_episodes([ep])[0]
+    store = SimpleNamespace(
+        stamp=AsyncMock(return_value="stamp"),
+        snapshot=AsyncMock(return_value=([ep], [])),
+        prune_sources=AsyncMock(),
+        cached_sources=AsyncMock(return_value={}),
+        save_sources=AsyncMock(),
+    )
+    compiler = SimpleNamespace(extract=AsyncMock(side_effect=UnverifiableEvidence()))
+    service = PersistedHydration(store, compiler, None)
+    job = dict(user="owner", token="lease", generation=1)
+    with pytest.raises(WorkPending):
+        await service.build(job)
+    store.save_sources.assert_awaited_once_with(
+        job, [source], [], quarantine_reason="nonliteral_quotes"
+    )
+
+
+@pytest.mark.parametrize("kind", ["explorer", "notion"])
+async def test_hydration_outage_does_not_prevent_classic_memory_correction(kind):
+    graph = SimpleNamespace(add_episode=AsyncMock(return_value=SimpleNamespace(nodes=[], edges=[])))
+    callback = AsyncMock(side_effect=RuntimeError("temporary hydration store failure"))
+    if kind == "explorer":
+        await GraphService(None, graph, callback).correct_memory("owner", "Martina es mi sobrina.")
+    else:
+        service = NotionCorrectionService(graph, None, callback)
+        item = CorrectionItem("Familia", "db", "page", "Martina", {}, {}, "Es mi sobrina.")
+        await service._correct_graph(item, "owner", "Spanish")
+    graph.add_episode.assert_awaited_once()
+    assert callback.await_count == 2

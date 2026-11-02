@@ -24,6 +24,7 @@ from app.core.observability import (
 )
 from app.core.posthog import posthog_user_context
 from app.schemas.models import GraphLink, GraphNode, GraphResponse
+from app.services.hydration_notifications import notify_hydration_changed
 
 logger = logging.getLogger(__name__)
 
@@ -117,8 +118,7 @@ class GraphService:
             try:
                 logger.info(f"Applying memory correction for group {group_id}")
 
-                if self.hydration_changed:
-                    await self.hydration_changed(group_id, invalidate=True)
+                await notify_hydration_changed(self.hydration_changed, group_id, invalidate=True)
 
                 with posthog_user_context(group_id):
                     await self.graphiti.add_episode(
@@ -130,8 +130,7 @@ class GraphService:
                         reference_time=datetime.now(),
                     )
 
-                if self.hydration_changed:
-                    await self.hydration_changed(group_id, invalidate=True)
+                await notify_hydration_changed(self.hydration_changed, group_id, invalidate=True)
                 set_span_attributes(
                     span,
                     {

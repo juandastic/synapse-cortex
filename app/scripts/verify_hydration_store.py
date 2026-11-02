@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import time
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -35,7 +36,9 @@ async def main(env_file):
             "episodes:['ep'],valid_at:datetime(),created_at:datetime()}]->(b)",
             user=user,
         )
-        await store.request(user, source_changed=True)
+        # Coexist with a pre-existing core that has no hydration properties.
+        await store.rows("CREATE (:SynapseUserCore {user_id:$user,version:1})", user=user)
+        await store.request(user)
         job = await store.claim(user)
         assert job and not await store.claim(user)
         episodes, edges = await store.snapshot(user)
@@ -51,9 +54,19 @@ async def main(env_file):
         )
         selected = compiler.fact_candidates([quote], edges)
         result, retained = compiler.render(selected, edges, GraphStats(2, 1))
+        result.seen_hashes = {f"id-{i}": "x" * 64 for i in range(1000)}
         assert await store.publish(job, await store.stamp(user), result, retained, episodes, edges)
         await store.release(job)
         assert (await store.read(user)).metadata.included_edge_ids == ["fact"]
+        state, refreshed = await store.chat_read(user, "previous-revision")
+        assert state == "updated" and refreshed.compilation_text == result.compilation_text
+        wire = await store.rows(
+            "MATCH (n:SynapseUserCore {user_id:$user}) RETURN "
+            "n.hydration_result AS result,n.hydration_payload AS payload",
+            user=user,
+        )
+        assert "seen_hashes" not in json.loads(wire[0]["result"])
+        assert len(wire[0]["payload"]) > 20 * len(wire[0]["result"])
 
         # A new episode does not revoke the old prepared snapshot or cancel its builder.
         await store.rows(
@@ -71,7 +84,7 @@ async def main(env_file):
         cache = store.selection_cache(job)
         assert await cache.load("batch") is None
         await cache.save("batch", ["fact"])
-        assert await store.selection_cache(job).load("batch") == ["fact"]
+        assert await store.selection_cache(job).load("batch") == {"ids": ["fact"], "sections": {}}
         episodes, edges = await store.snapshot(user)
         assert await store.publish(job, await store.stamp(user), result, retained, episodes, edges)
         await store.release(job)

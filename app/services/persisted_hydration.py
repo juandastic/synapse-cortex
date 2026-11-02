@@ -10,6 +10,7 @@ from app.services.hydration_compiler import (
     BATCH_CHARS,
     COMPILER_VERSION,
     HydrationCompiler,
+    UnverifiableEvidence,
     WorkPending,
     digest,
     sources_from_episodes,
@@ -102,7 +103,14 @@ class PersistedHydration:
 
             async def extract_batch(batch):
                 async with semaphore:
-                    items = await asyncio.wait_for(self.compiler.extract(batch), timeout=120)
+                    try:
+                        items = await asyncio.wait_for(self.compiler.extract(batch), timeout=120)
+                    except UnverifiableEvidence:
+                        logger.warning("Quarantining unverifiable hydration extraction batch")
+                        await self.store.save_sources(
+                            job, batch, [], quarantine_reason="nonliteral_quotes"
+                        )
+                        return []
                     await self.store.save_sources(job, batch, items)
                     return items
 
@@ -116,7 +124,7 @@ class PersistedHydration:
                 tasks = [group.create_task(extract_batch(batch)) for batch in batches[:2]]
             for task in tasks:
                 candidates.extend(task.result())
-            if len(batches) > 2:
+            if batches:
                 raise WorkPending()
             candidates = self.compiler.fact_candidates(candidates, edges)
             previous = await self.store.current(user)
@@ -125,6 +133,10 @@ class PersistedHydration:
             hashes = {c["id"]: digest(c) for c in candidates}
             lookup = {c["id"]: c for c in candidates}
             if previous:
+                previous_selected = {c["id"]: c for c in previous.get("selected", [])}
+                for cid, candidate in lookup.items():
+                    if cid in previous_selected:
+                        candidate["fact_section"] = previous_selected[cid].get("fact_section")
                 before = [c["id"] for c in previous.get("selected", []) if c["id"] in lookup]
                 changed = [
                     c
@@ -176,6 +188,8 @@ class PersistedHydration:
                 )
             except Exception:
                 logger.warning("Provider cache preparation failed; publication can be sent inline")
+        if await self.store.stamp(user) != stamp:
+            return False
         return await self.store.publish(job, stamp, result, retained, episodes, edges)
 
     async def run_one(self, user=None):

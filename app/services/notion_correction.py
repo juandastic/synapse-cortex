@@ -42,6 +42,7 @@ from app.core.observability import (
     set_span_attributes,
 )
 from app.core.posthog import capture_span, capture_trace, new_trace_id, posthog_user_context
+from app.services.hydration_notifications import notify_hydration_changed
 from app.services.notion_correction_job_store import (
     complete_notion_correction_job,
     fail_notion_correction_job,
@@ -700,8 +701,9 @@ class NotionCorrectionService:
                     item.page_id,
                 )
                 with posthog_user_context(group_id):
-                    if self._hydration_changed:
-                        await self._hydration_changed(group_id, invalidate=True)
+                    await notify_hydration_changed(
+                        self._hydration_changed, group_id, invalidate=True
+                    )
                     result = await self._graphiti.add_episode(
                         name="notion_correction",
                         episode_body=episode_body,
@@ -713,8 +715,9 @@ class NotionCorrectionService:
                         reference_time=datetime.now(),
                         custom_extraction_instructions=extraction_instructions,
                     )
-                    if self._hydration_changed:
-                        await self._hydration_changed(group_id, invalidate=True)
+                    await notify_hydration_changed(
+                        self._hydration_changed, group_id, invalidate=True
+                    )
                 set_span_attributes(
                     span,
                     {

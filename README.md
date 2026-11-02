@@ -1849,6 +1849,9 @@ active graph facts. Published text copies those facts and temporal fields in ful
 old quotes cannot restore an invalidated relation. This preserves Graphiti's
 existing extraction quality and its limitations. It does not repair incorrect
 subjects already stored in the graph. Episode context is not a claim-level proof.
+The selector classifies the facts themselves into topics; rendering never borrows
+an unrelated quote's author, claim type or topic. Unclassified facts use a neutral
+section, and conversation records are not labeled as direct user testimony.
 Explicit do-not-store blocks and technical tests are omitted from source
 extraction; this does not retroactively delete their graph records. Correction
 episodes are attributed separately and retain clarifications containing "no recuerdes".
@@ -1861,12 +1864,16 @@ claim IDs/hashes, not old copies of personal text, with at most 20 revisions per
 None of these records are
 Graphiti `Entity` or `Episodic` nodes. The original graph remains unchanged.
 
-One worker per API process leases a user. Each slice performs at most two parallel
-extraction calls and two uncached selection calls, with a five-minute limit.
+One worker per API process leases a user. Each slice performs either at most two
+parallel extraction calls, or two uncached selection calls, with a five-minute limit.
 Progress survives restarts, and the worker yields between slices to serve other
 users. Expired leases can be reclaimed. Failures retry with exponential backoff
 from 30 seconds, stopping after five failures per generation. Unsupported archives
 stop immediately; new ingestion or correction reactivates them. V2 remains available.
+Nonliteral extraction batches are quarantined by source hash with a logged reason;
+other batches can still publish. Invalid selection IDs use a logged fallback to
+recent known records. Neither case can publish invented text or suppress RAG for
+omitted facts.
 Initial construction can take minutes for large archives. Later versions select
 from the previous resident context plus changed candidates, reusing extraction
 and reduction decisions. Additive changes keep serving the prepared version.
@@ -1874,7 +1881,8 @@ and reduction decisions. Additive changes keep serving the prepared version.
 Chat refresh requires both existing compilation text and v2 metadata. It reads
 one indexed revision record with a 250 ms timeout and preserves the client's
 memory if that lookup fails. It does not scan the archive, rebuild v2, or create
-a provider cache. The worker prepares a cache before publication when possible;
+a provider cache. Chat reads a separate public result property, excluding the
+worker's candidate hashes, selection history and source quotes. The worker prepares a cache before publication when possible;
 `/hydrate` can also create or renew one using stored text. Argon does not use
 explicit caches. Convex's existing cache remains a transport copy.
 
@@ -1890,6 +1898,8 @@ Source stamps detect additions. Selected episode hashes and covered-fact hashes
 revoke destructive changes without incrementing a running builder's generation.
 Ingestion validates these dependencies before retaining an older snapshot.
 Graph Explorer and Notion corrections also revoke explicitly.
+Hydration notification failures are logged and do not prevent either correction
+path from writing its authoritative graph update.
 Revoked published text/cache IDs are replaced on the next chat request. The
 Cleanup tools remove the derived labels as well as Graphiti's `group_id` records.
 

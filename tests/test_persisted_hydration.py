@@ -117,12 +117,13 @@ async def test_extraction_rejects_unknown_sources_and_nonliteral_quotes():
     assert accepted[0]["attribution"] == "usuario"
 
 
-async def test_unknown_selection_id_is_a_failed_build_not_silent_memory_loss():
+async def test_unknown_selection_id_retains_known_records_without_publishing_invented_ids(caplog):
     compiler = HydrationCompiler(
         SimpleNamespace(generate_response=AsyncMock(return_value={"ids": ["not-a-source"]}))
     )
-    with pytest.raises(ValueError, match="unknown claim"):
-        await compiler.select([claim()])
+    selected = await compiler.select([claim()])
+    assert [c["id"] for c in selected] == ["claim"]
+    assert "Unverifiable hydration selection" in caplog.text
 
 
 def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
