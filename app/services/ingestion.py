@@ -2,7 +2,7 @@
 Ingestion Service - Processes chat sessions via Graphiti.
 
 Graphiti add_episode extracts entities and relationships into Neo4j.
-Hydration (compilation) happens on-demand via GET /ingest/status when the job completes.
+Published hydration builds after evidence finalization; status reads it or uses the v2 fallback.
 
 Async flow: accept_session returns 202 immediately, _process_background runs in background.
 """
@@ -52,6 +52,8 @@ SUMMARY_PROMPT = (
 
 # Cap input to the summarization call to control cost
 SUMMARY_INPUT_LIMIT = 8000
+SUMMARY_TIMEOUT_SECONDS = 30
+SUMMARY_STORE_TIMEOUT_SECONDS = 10
 
 
 class EpisodeSummary(BaseModel):
@@ -61,9 +63,10 @@ class EpisodeSummary(BaseModel):
 class IngestionService:
     """Service for processing chat sessions into the knowledge graph."""
 
-    def __init__(self, graphiti: Graphiti, model: str):
+    def __init__(self, graphiti: Graphiti, model: str, hydration_changed=None):
         self.graphiti = graphiti
         self.model = model
+        self.hydration_changed = hydration_changed
 
     async def accept_session(self, request: IngestRequest) -> IngestAcceptedResponse:
         """
@@ -101,7 +104,7 @@ class IngestionService:
     async def _process_background(self, job_id: str, request: IngestRequest) -> None:
         """
         Background task: run Graphiti add_episode, update job store on completion/failure.
-        Does NOT run hydration (that happens on GET when status is "completed").
+        Queues hydration only after finalizing evidence; never waits for compilation.
         """
         tracer = trace.get_tracer(__name__)
         posthog_trace_id = new_trace_id()
@@ -133,18 +136,6 @@ class IngestionService:
                         ),
                     )
                 elapsed_ms = (time.monotonic() - start_time) * 1000
-
-                # Update job store with completion metadata (no hydration here).
-                # Done BEFORE summarization so the client gets "completed" without
-                # waiting for the summary LLM call.
-                complete_job(
-                    job_id,
-                    model=self.model,
-                    processing_time_ms=round(elapsed_ms, 1),
-                    nodes_extracted=len(result.nodes),
-                    edges_extracted=len(result.edges),
-                    episode_id=result.episode.uuid,
-                )
 
                 logger.info(
                     f"Successfully processed session {request.sessionId} "
@@ -183,13 +174,42 @@ class IngestionService:
                 )
 
                 # Summarize the episode and store on the Neo4j node.
-                # Runs AFTER complete_job so the client isn't blocked.
+                # Finalize evidence before publishing completion or queuing compilation.
                 if result.episode:
-                    with posthog_user_context(request.userId, posthog_trace_id, request.sessionId):
-                        summary = await self._summarize_episode(episode_content)
-                    if summary:
-                        await self._store_episode_summary(result.episode.uuid, summary)
-                        logger.info(f"Stored episode summary ({len(summary)} chars)")
+                    try:
+                        with posthog_user_context(
+                            request.userId, posthog_trace_id, request.sessionId
+                        ):
+                            summary = await asyncio.wait_for(
+                                self._summarize_episode(episode_content),
+                                timeout=SUMMARY_TIMEOUT_SECONDS,
+                            )
+                        if summary:
+                            await asyncio.wait_for(
+                                self._store_episode_summary(result.episode.uuid, summary),
+                                timeout=SUMMARY_STORE_TIMEOUT_SECONDS,
+                            )
+                            logger.info(f"Stored episode summary ({len(summary)} chars)")
+                    except Exception:
+                        logger.warning(
+                            "Optional episode summary failed; graph ingestion committed",
+                            exc_info=True,
+                        )
+
+                if self.hydration_changed is not None:
+                    try:
+                        await self.hydration_changed(request.userId)
+                    except Exception:
+                        # Graph ingestion succeeded. /hydrate also bootstraps missing work.
+                        logger.exception("Could not enqueue hydration; next read will retry")
+                complete_job(
+                    job_id,
+                    model=self.model,
+                    processing_time_ms=round((time.monotonic() - start) * 1000, 1),
+                    nodes_extracted=len(result.nodes),
+                    edges_extracted=len(result.edges),
+                    episode_id=result.episode.uuid,
+                )
 
             except Exception as e:
                 category, code = classify_error(e)

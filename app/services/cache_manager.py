@@ -1,12 +1,16 @@
 """
 Cache Manager - Gemini explicit context caching lifecycle.
 
-Stateless: the cache name returned on creation is persisted client-side
-and forwarded in chat requests, so the backend does not track user → cache
-mappings in memory.
+Cache names are persisted by the caller and forwarded in chat requests.
+A bounded-by-expiration process-local index avoids duplicate provider caches;
+losing it only creates a replacement provider cache, never recompiles memory.
 """
 
+import asyncio
+import hashlib
 import logging
+import time
+from weakref import WeakValueDictionary
 
 from google import genai
 from google.genai import types
@@ -35,6 +39,16 @@ class CacheManager:
         self._model = model
         self._ttl = default_ttl
         self._grounding_enabled = grounding_enabled
+        self._recent: dict[tuple[str, str], tuple[str, float]] = {}
+        self._create_locks = WeakValueDictionary()
+
+    @property
+    def model_name(self):
+        return self._model
+
+    @property
+    def ttl_seconds(self):
+        return float(self._ttl.removesuffix("s"))
 
     async def create_compilation_cache(
         self,
@@ -58,6 +72,24 @@ class CacheManager:
                 MIN_CHARS_FOR_CACHE,
             )
             return None, "compilation_too_small"
+
+        # Repeated hydrate requests renew provider storage, not the compiler.
+        # Serialize creation to avoid duplicate upstream caches for the same text.
+        key = (user_id, hashlib.sha256(compilation_text.encode()).hexdigest())
+        lock = self._create_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            self._recent = {k: v for k, v in self._recent.items() if v[1] > now}
+            if key in self._recent:
+                return self._recent[key][0], ""
+            name, reason = await self._create_cache(user_id, compilation_text)
+            if name:
+                # The configured lifecycle uses seconds; stop reusing before expiry.
+                ttl = max(0, self.ttl_seconds / 2)
+                self._recent[key] = (name, now + ttl)
+            return name, reason
+
+    async def _create_cache(self, user_id, compilation_text):
 
         try:
             cache_config: dict = {
@@ -94,6 +126,7 @@ class CacheManager:
 
     async def invalidate_by_name(self, cache_name: str) -> None:
         """Best-effort delete of a cache by its resource name."""
+        self._recent = {k: v for k, v in self._recent.items() if v[0] != cache_name}
         try:
             await self._client.aio.caches.delete(name=cache_name)
             logger.info("Deleted Gemini cache %s", cache_name)

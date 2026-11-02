@@ -14,11 +14,13 @@ from graphiti_core.prompts.models import Message
 from tenacity import wait_none
 
 from app.core import posthog
-from app.core.config import Settings
+from app.core.config import HYDRATION_MODEL, Settings
 from app.core.graphiti_client import create_graphiti
 from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
+from app.services.hydration_compiler import HydrationCompiler, Source
+from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
 
 
@@ -50,7 +52,7 @@ def analytics(monkeypatch):
 async def make_client():
     clients = []
 
-    def make(handler):
+    def make(handler, model="openai/main"):
         sdk = openai.AsyncOpenAI(
             api_key="test-only",
             base_url="https://openrouter.ai/api/v1",
@@ -58,7 +60,7 @@ async def make_client():
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         client = OpenRouterGraphitiClient(
-            LLMConfig(model="openai/main", small_model="openai/small"), client=sdk
+            LLMConfig(model=model, small_model="openai/small"), client=sdk
         )
         clients.append(client)
         return client
@@ -370,3 +372,93 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
         assert graph.cross_encoder.config.model is None  # Google's default, never an OpenAI ID.
     finally:
         await graph.llm_client.close()
+
+
+async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make_client, analytics):
+    requests = []
+    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        schema = payload["response_format"]["json_schema"]
+        if schema["name"] == "Extraction":
+            answer = {
+                "spans": [
+                    {
+                        "source_id": source.id,
+                        "quote": source.text,
+                        "section": "Personas y vínculos",
+                        "kind": "relato",
+                    }
+                ]
+            }
+        else:
+            answer = {
+                "ids": ["fact"],
+                "sections": [{"id": "fact", "section": "Personas y vínculos"}],
+            }
+        return httpx.Response(
+            200,
+            json=completion(
+                answer,
+                model=payload["model"],
+                usage={
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "total_tokens": 120,
+                    "cost": 0.001,
+                },
+            ),
+        )
+
+    hydration_client = make_client(handler, model=HYDRATION_MODEL)
+    compiler = HydrationCompiler(hydration_client)
+    facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+    with posthog_user_context("owner", "hydration-trace", "session"):
+        quotes = await compiler.extract([source])
+        selected = await compiler.select(compiler.fact_candidates(quotes, facts))
+    result, _ = compiler.render(selected, facts, GraphStats(2, 1))
+    assert "Martina es mi sobrina" in result.compilation_text
+    assert result.metadata.included_edge_ids == ["fact"]
+    assert len(requests) == 2
+
+    def assert_strict_objects(schema):
+        if isinstance(schema, dict):
+            if schema.get("type") == "object":
+                assert schema["additionalProperties"] is False
+            for item in schema.values():
+                assert_strict_objects(item)
+        elif isinstance(schema, list):
+            for item in schema:
+                assert_strict_objects(item)
+
+    for request in requests:
+        assert request["model"] == HYDRATION_MODEL
+        assert 0 < request["max_completion_tokens"] <= 16384
+        assert request["reasoning"]["effort"] == "low"
+        assert request["response_format"]["json_schema"]["strict"] is True
+        assert_strict_objects(request["response_format"]["json_schema"]["schema"])
+    assert analytics.capture.call_count == 2
+    names = set()
+    for call in analytics.capture.call_args_list:
+        assert call.kwargs["distinct_id"] == "owner"
+        props = call.kwargs["properties"]
+        assert props["$ai_trace_id"] == "hydration-trace"
+        assert props["$ai_session_id"] == "session"
+        assert props["$ai_provider"] == "openrouter"
+        assert props["$ai_total_cost_usd"] == 0.001
+        names.add(props["prompt_name"])
+    assert names == {"hydration.extract", "hydration.select"}
+
+
+async def test_hydration_limits_provider_call_duration(monkeypatch):
+    monkeypatch.setattr("app.services.hydration_compiler.LLM_TIMEOUT_SECONDS", 0.01)
+
+    async def stalled(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
+    source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
+    with pytest.raises(TimeoutError):
+        await compiler.extract([source])

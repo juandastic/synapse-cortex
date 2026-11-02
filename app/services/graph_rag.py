@@ -43,7 +43,8 @@ EDGE_AND_NODE_HYBRID_SEARCH_RRF = SearchConfig(
     node_config=NODE_HYBRID_SEARCH_RRF.node_config,
     episode_config=None,
     community_config=None,
-    limit=10,
+    # Overfetch before deduplication so covered hits do not starve novel facts.
+    limit=30,
 )
 
 
@@ -222,13 +223,15 @@ async def retrieve_graph_rag_context(
         )
     search_ms = (time.monotonic() - start_search) * 1000
 
-    new_edges = [edge for edge in results.edges if edge.uuid not in included_edge_ids]
-    new_nodes = [node for node in results.nodes if node.uuid not in included_node_ids]
+    eligible_edges = [edge for edge in results.edges if edge.uuid not in included_edge_ids]
+    eligible_nodes = [node for node in results.nodes if node.uuid not in included_node_ids]
+    new_edges = eligible_edges[:10]
+    new_nodes = eligible_nodes[:10]
     context_block = build_context_block(new_edges, new_nodes)
     total_ms = (time.monotonic() - start_total) * 1000
 
-    deduped_edges = len(results.edges) - len(new_edges)
-    deduped_nodes = len(results.nodes) - len(new_nodes)
+    deduped_edges = len(results.edges) - len(eligible_edges)
+    deduped_nodes = len(results.nodes) - len(eligible_nodes)
     total_injected = len(new_edges) + len(new_nodes)
 
     logger.info(

@@ -8,6 +8,7 @@ class CompilationMetadata:
     included_node_ids: list[str] = field(default_factory=list)
     included_edge_ids: list[str] = field(default_factory=list)
     included_episode_ids: list[str] = field(default_factory=list)
+    compilation_revision: str | None = None
 
 
 @dataclass
@@ -24,3 +25,6 @@ class HydrationResult:
     compilation_text: str
     metadata: CompilationMetadata | None = None
     graph_stats: GraphStats | None = None
+    provider_cache_name: str | None = None
+    provider_cache_model: str | None = None
+    provider_cache_expires_at: float = 0

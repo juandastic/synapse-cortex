@@ -1,4 +1,6 @@
+import asyncio
 import unittest
+from unittest.mock import AsyncMock
 
 from app.services.cache_manager import MIN_CHARS_FOR_CACHE, CacheManager
 
@@ -18,6 +20,29 @@ class _FakeClient:
 
 
 class CacheManagerGroundingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_identical_hydration_reuses_cache_until_expiry_or_invalidation(self):
+        client = _FakeClient()
+        client.aio.caches.create = AsyncMock(
+            return_value=type("Cache", (), {"name": "cachedContents/test"})()
+        )
+        client.aio.caches.delete = AsyncMock()
+        manager = CacheManager(client, "model", grounding_enabled=False)
+        text = "x" * MIN_CHARS_FOR_CACHE
+        first, second = await asyncio.gather(
+            manager.create_compilation_cache("owner", text),
+            manager.create_compilation_cache("owner", text),
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(client.aio.caches.create.await_count, 1)
+        await manager.invalidate_by_name(first[0])
+        await manager.create_compilation_cache("owner", text)
+        self.assertEqual(client.aio.caches.create.await_count, 2)
+        manager._recent = {key: (name, 0) for key, (name, _) in manager._recent.items()}
+        await manager.create_compilation_cache("owner", text)
+        self.assertEqual(client.aio.caches.create.await_count, 3)
+        await manager.create_compilation_cache("another-owner", text)
+        self.assertEqual(client.aio.caches.create.await_count, 4)
+
     async def test_cache_contains_google_search_when_enabled(self):
         for model in ("gemini-3.1-pro-preview", "gemini-4-argon"):
             with self.subTest(model=model):

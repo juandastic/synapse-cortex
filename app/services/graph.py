@@ -24,6 +24,7 @@ from app.core.observability import (
 )
 from app.core.posthog import posthog_user_context
 from app.schemas.models import GraphLink, GraphNode, GraphResponse
+from app.services.hydration_notifications import notify_hydration_changed
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +56,10 @@ RETURN source.uuid AS source, target.uuid AS target,
 class GraphService:
     """Service for knowledge graph visualization and memory correction."""
 
-    def __init__(self, driver: AsyncDriver, graphiti: Graphiti):
+    def __init__(self, driver: AsyncDriver, graphiti: Graphiti, hydration_changed=None):
         self.driver = driver
         self.graphiti = graphiti
+        self.hydration_changed = hydration_changed
 
     async def get_graph(self, group_id: str) -> GraphResponse:
         """
@@ -116,6 +118,8 @@ class GraphService:
             try:
                 logger.info(f"Applying memory correction for group {group_id}")
 
+                await notify_hydration_changed(self.hydration_changed, group_id, invalidate=True)
+
                 with posthog_user_context(group_id):
                     await self.graphiti.add_episode(
                         name="user_memory_correction",
@@ -126,6 +130,7 @@ class GraphService:
                         reference_time=datetime.now(),
                     )
 
+                await notify_hydration_changed(self.hydration_changed, group_id, invalidate=True)
                 set_span_attributes(
                     span,
                     {

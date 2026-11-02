@@ -9,10 +9,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from graphiti_core.llm_client.config import LLMConfig
 from neo4j import AsyncGraphDatabase
 
 from app.api.routes import router
-from app.core.config import create_genai_client, create_posthog_genai_client, get_settings
+from app.core.config import (
+    HYDRATION_MODEL,
+    create_genai_client,
+    create_posthog_genai_client,
+    get_settings,
+)
 from app.core.graphiti_client import create_graphiti
 from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.posthog import get_posthog, init_posthog, shutdown_posthog
@@ -21,10 +27,13 @@ from app.services.cache_manager import CacheManager
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
+from app.services.hydration_compiler import HydrationCompiler
+from app.services.hydration_store import HydrationStore
 from app.services.ingestion import IngestionService
 from app.services.notion_correction import NotionCorrectionService
 from app.services.notion_export import NotionExportService
 from app.services.openrouter_generation import OpenRouterGenerationService
+from app.services.persisted_hydration import PersistedHydration
 
 # Configure logging
 logging.basicConfig(
@@ -43,6 +52,8 @@ async def lifespan(app: FastAPI):
     cleans up on shutdown.
     """
     settings = get_settings()
+    if not settings.open_router_api_key:
+        raise ValueError("OPEN_ROUTER_API_KEY is required for hydration compilation")
     logger.info("Starting Synapse Cortex...")
 
     # Initialize PostHog LLM Analytics (optional)
@@ -106,12 +117,29 @@ async def lifespan(app: FastAPI):
 
     # Initialize services
     hydration_service = HydrationService(neo4j_driver)
-    ingestion_service = IngestionService(graphiti, settings.graphiti_model)
+    hydration_llm = OpenRouterGraphitiClient(
+        LLMConfig(
+            api_key=settings.open_router_api_key,
+            model=HYDRATION_MODEL,
+            small_model=HYDRATION_MODEL,
+            max_tokens=16384,
+        ),
+        reasoning_effort="low",
+    )
+    persisted = PersistedHydration(
+        HydrationStore(neo4j_driver),
+        HydrationCompiler(hydration_llm),
+        hydration_service,
+        cache_manager=cache_manager,
+    )
+    await persisted.start()
+    hydration_service.persisted = persisted
+    ingestion_service = IngestionService(graphiti, settings.graphiti_model, persisted.changed)
     generation_service = GenerationService(
         generation_client,
         grounding_enabled=settings.grounding_enabled,
     )
-    graph_service = GraphService(neo4j_driver, graphiti)
+    graph_service = GraphService(neo4j_driver, graphiti, persisted.changed)
     notion_export_service = NotionExportService(
         hydration_service=hydration_service,
         settings=settings,
@@ -119,6 +147,7 @@ async def lifespan(app: FastAPI):
     notion_correction_service = NotionCorrectionService(
         graphiti=graphiti,
         settings=settings,
+        hydration_changed=persisted.changed,
     )
 
     # Store in app state for dependency injection
@@ -142,6 +171,8 @@ async def lifespan(app: FastAPI):
     # Cleanup on shutdown
     logger.info("Shutting down Synapse Cortex...")
     await app.state.openrouter_generation_service.close()
+    await persisted.close()
+    await hydration_llm.close()
     await neo4j_driver.close()
     await graphiti.close()
     if isinstance(graphiti.llm_client, OpenRouterGraphitiClient):

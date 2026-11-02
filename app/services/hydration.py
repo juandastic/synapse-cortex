@@ -9,6 +9,7 @@ Supports two compilation strategies:
   v2 - Cascading waterfill allocation with token budget
 """
 
+import asyncio
 import time
 from typing import Literal
 
@@ -87,13 +88,77 @@ class HydrationService:
     def __init__(self, driver: AsyncDriver, min_degree: int = DEFAULT_MIN_DEGREE):
         self.driver = driver
         self.min_degree = min_degree
+        self.persisted = None
+
+    async def refresh_chat_compilation(self, request) -> bool:
+        """Pick up a newly published revision without waiting for a new session.
+
+        Existing v1 and legacy clients retain their contract.
+        A revoked published snapshot must never survive through the client's cache.
+        """
+        if (
+            self.persisted is None
+            or not request.user_id
+            or not request.compilation
+            or request.compilationMetadata is None
+        ):
+            return False
+        old_revision = getattr(request.compilationMetadata, "compilation_revision", None)
+        try:
+            state, published = await asyncio.wait_for(
+                self.persisted.store.chat_read(request.user_id, old_revision), timeout=0.25
+            )
+        except Exception:
+            # An unavailable graph is not evidence that the client's snapshot
+            # was revoked. Preserve the existing cached-memory availability.
+            return False
+        from dataclasses import asdict
+
+        from app.schemas.models import CompilationMetadataResponse
+
+        if state in {"revoked", "absent"} and old_revision:
+            request.compilation = None
+            request.cache_name = None
+            # Retrieval can still supply current active facts. Never rebuild
+            # the entire v2 context in the chat's latency-sensitive path.
+            request.compilationMetadata = CompilationMetadataResponse(
+                is_partial=True,
+                total_estimated_tokens=0,
+                included_node_ids=[],
+                included_edge_ids=[],
+            )
+            return True
+        if state != "updated" or published is None:
+            return False
+
+        unchanged = request.compilation == published.compilation_text
+        request.compilationMetadata = (
+            CompilationMetadataResponse(**asdict(published.metadata))
+            if published.metadata is not None
+            else None
+        )
+        if unchanged:
+            return False
+        request.compilation = published.compilation_text
+        request.cache_name = (
+            published.provider_cache_name
+            if request.provider == "vertex"
+            and request.model == published.provider_cache_model
+            and request.model != "gemini-4-argon"
+            else None
+        )
+        return True
 
     async def build_user_knowledge(
         self,
         user_id: str,
         version: Literal["v1", "v2"] = "v1",
     ) -> HydrationResult:
-        graph_stats = await self._fetch_graph_stats(user_id)
+        if version == "v2" and self.persisted is not None:
+            published = await self.persisted.read(user_id)
+            if published is not None:
+                return published
+        graph_stats = await self.fetch_graph_stats(user_id)
 
         if version == "v2":
             engine = HydrationV2Engine(self.driver, self.min_degree)
@@ -262,7 +327,7 @@ class HydrationService:
             mark_span_success(span)
             return lines
 
-    async def _fetch_graph_stats(self, group_id: str) -> GraphStats:
+    async def fetch_graph_stats(self, group_id: str) -> GraphStats:
         """
         Fetch total entity and relationship counts for the user's graph.
 
