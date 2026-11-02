@@ -8,10 +8,9 @@ from app.core.posthog import posthog_user_context
 from app.services.hydration_compiler import (
     COMPILER_VERSION,
     HydrationCompiler,
-    WorkPending,
-    digest,
+    fact_hash,
 )
-from app.services.hydration_consolidation import consolidate
+from app.services.hydration_consolidation import apply_plan, organize
 
 logger = logging.getLogger(__name__)
 
@@ -73,110 +72,62 @@ class PersistedHydration:
 
     async def build(self, job) -> bool:
         user = job["user"]
-        stamp = await self.store.stamp(user)
-        episodes, edges = await self.store.snapshot(user)
-        with posthog_user_context(user):
-            candidates = self.compiler.fact_candidates(episodes, edges)
-            cache = self.store.group_cache(job)
-            grouped, seen_hashes = await self._group_incremental(job, candidates, cache=cache)
-            records = await consolidate(
-                grouped, self.compiler.llm, cache, retry_epoch=job["generation"]
-            )
-        result, _ = await self._render_guarded(user, episodes, candidates, records, edges)
-        return await self._publish_if_unchanged(
-            job,
-            stamp,
-            result,
-            episodes,
-            edges,
-            seen_hashes,
-            {c["id"]: c["fact_section"] for c in grouped if not c.get("classification_fallback")},
-        )
-
-    async def _group_incremental(
-        self, job, candidates, *, cache=None
-    ) -> tuple[list[dict], dict[str, str]]:
-        previous = await self.store.current(job["user"]) or {}
-        if previous.get("compiler") != COMPILER_VERSION:
-            previous = {}
-        seen_hashes = {c["id"]: digest(c) for c in candidates}
-        current_ids = {c["id"] for c in candidates}
-        sections = {
-            cid: title
-            for cid, title in previous.get("fact_sections", {}).items()
-            if cid in current_ids
-        }
-        pending = []
-        grouped = {}
-        for candidate in candidates:
-            cid = candidate["id"]
-            if previous.get("seen_hashes", {}).get(cid) == seen_hashes[cid] and sections.get(cid):
-                grouped[cid] = {
-                    **candidate,
-                    "fact_section": sections[cid],
-                }
-            else:
-                pending.append(
-                    {
-                        **candidate,
-                        "classification_retry": previous.get("seen_hashes", {}).get(cid)
-                        == seen_hashes[cid],
-                    }
-                )
-        if pending:
-            classified = await self.compiler.group(
-                pending,
-                cache=cache if cache is not None else self.store.group_cache(job),
-                existing_groups=list(dict.fromkeys(sections.values())),
-                retry_epoch=job["generation"] if previous else None,
-            )
-            grouped.update({c["id"]: c for c in classified})
-        return [grouped[c["id"]] for c in candidates], seen_hashes
-
-    async def _render_guarded(self, user, episodes, candidates, grouped, edges):
-        if candidates and not grouped:
-            raise ValueError("Grouping omitted every available fact; preserving legacy hydration")
-        stats = await self.hydration_service.fetch_graph_stats(user)
-        if not grouped and (episodes or stats.entity_count or stats.relationship_count):
+        edges, head, stats = await self.store.select(user)
+        candidates = self.compiler.fact_candidates(edges)
+        if not candidates and (head or stats.entity_count or stats.relationship_count):
             raise UnsupportedArchive("No active graph facts; preserving classic hydration")
-        result, retained = self.compiler.render(grouped, edges, stats)
-        if grouped and not result.compilation_text:
+        fingerprint = self.compiler.fingerprint(candidates)
+        previous = await self.store.current(user) or {}
+        with posthog_user_context(user):
+            if (
+                previous.get("compiler") == COMPILER_VERSION
+                and previous.get("fingerprint") == fingerprint
+            ):
+                plan, reusable = previous["llm"], True
+            else:
+                plan, reusable = await organize(candidates, self.compiler.llm)
+        records = apply_plan(candidates, plan)
+        result, _ = self.compiler.render(records, edges, stats)
+        if candidates and not result.compilation_text:
             raise ValueError("Compilation budget omitted every available fact")
-        return result, retained
-
-    async def _publish_if_unchanged(
-        self, job, stamp, result, episodes, edges, seen_hashes, fact_sections
-    ) -> bool:
-        if await self.store.stamp(job["user"]) != stamp:
-            # Keep this job dirty. An old builder must not revoke a newer
-            # publication if its lease was already reclaimed by another process.
+        dependencies = {
+            e["uuid"]: fact_hash(e) for e in edges if e["uuid"] in result.metadata.included_edge_ids
+        }
+        await self._prepare_provider_cache(user, result)
+        # No archive scan: validate only facts actually rendered, after the
+        # provider-cache await and immediately before the fenced publication.
+        if not await self.store.validate(user, dependencies) or await self.store.head(user) != head:
             return False
-        if self.cache_manager and result.compilation_text:
-            try:
-                name, _ = await asyncio.wait_for(
-                    self.cache_manager.create_compilation_cache(
-                        job["user"], result.compilation_text
-                    ),
-                    timeout=10,
-                )
-                result.provider_cache_name = name
-                result.provider_cache_model = self.cache_manager.model_name
-                result.provider_cache_expires_at = (
-                    time.time() + self.cache_manager.ttl_seconds if name else 0
-                )
-            except Exception:
-                logger.warning("Provider cache preparation failed; publication can be sent inline")
-        if await self.store.stamp(job["user"]) != stamp:
-            return False
+        logger.info(
+            "Hydration bounded build: %d selected, %d covered, reused=%s",
+            len(candidates),
+            len(dependencies),
+            previous.get("fingerprint") == fingerprint,
+        )
         return await self.store.publish(
             job,
-            stamp,
             result,
-            episodes,
-            edges,
-            seen_hashes=seen_hashes,
-            fact_sections=fact_sections,
+            fingerprint=fingerprint if reusable else None,
+            plan=plan,
+            dependencies=dependencies,
+            head=head,
         )
+
+    async def _prepare_provider_cache(self, user, result):
+        if not self.cache_manager or not result.compilation_text:
+            return
+        try:
+            name, _ = await asyncio.wait_for(
+                self.cache_manager.create_compilation_cache(user, result.compilation_text),
+                timeout=10,
+            )
+            result.provider_cache_name = name
+            result.provider_cache_model = self.cache_manager.model_name
+            result.provider_cache_expires_at = (
+                time.time() + self.cache_manager.ttl_seconds if name else 0
+            )
+        except Exception:
+            logger.warning("Provider cache preparation failed; publication can be sent inline")
 
     async def run_one(self, user=None):
         job = await self.store.claim(user=user) if user else await self.store.claim()
@@ -189,8 +140,6 @@ class PersistedHydration:
         terminal = False
         try:
             await build_task
-        except WorkPending:
-            pass
         except UnsupportedArchive:
             terminal = True
             logger.info("No active graph facts; preserving classic hydration until memory changes")

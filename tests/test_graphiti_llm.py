@@ -20,7 +20,7 @@ from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
 from app.services.hydration_compiler import HydrationCompiler
-from app.services.hydration_consolidation import consolidate
+from app.services.hydration_consolidation import apply_plan, organize
 from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
 
@@ -383,8 +383,8 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         payload = json.loads(request.content)
         requests.append(payload)
         schema = payload["response_format"]["json_schema"]
-        assert schema["name"] == "Grouping"
-        answer = {"groups": [{"title": "Personas y vínculos", "ids": ["fact"]}]}
+        assert schema["name"] == "Organization"
+        answer = {"groups": [{"title": "Personas y vínculos", "ids": ["F1"]}]}
         return httpx.Response(
             200,
             json=completion(
@@ -403,7 +403,18 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
     compiler = HydrationCompiler(hydration_client)
     facts = [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
-        selected = await compiler.group(compiler.fact_candidates([episode], facts))
+        plan, _ = await organize(
+            compiler.fact_candidates(
+                [{**f, "date": episode["valid_at"], "episode_ids": ["ep"]} for f in facts]
+            ),
+            hydration_client,
+        )
+    selected = apply_plan(
+        compiler.fact_candidates(
+            [{**f, "date": episode["valid_at"], "episode_ids": ["ep"]} for f in facts]
+        ),
+        plan,
+    )
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Martina es mi sobrina" in result.compilation_text
     assert result.metadata.included_edge_ids == ["fact"]
@@ -435,7 +446,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert props["$ai_provider"] == "openrouter"
         assert props["$ai_total_cost_usd"] == 0.001
         names.add(props["prompt_name"])
-    assert names == {"hydration.group"}
+    assert names == {"hydration.organize"}
 
 
 async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and_tracking(
@@ -456,7 +467,7 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
                     }
                 ]
             }
-            if name == "Proposal"
+            if name == "Organization"
             else {
                 "reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]
             }
@@ -475,7 +486,8 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
         for i, field in enumerate(["física", "química"])
     ]
     with posthog_user_context("owner", "trace", "session"):
-        result = await consolidate(facts, make_client(handler, model=HYDRATION_MODEL))
+        plan, _ = await organize(facts, make_client(handler, model=HYDRATION_MODEL))
+        result = apply_plan(facts, plan)
     assert len(result) == 1
     assert len(requests) == 2
     assert all(
@@ -483,7 +495,7 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
         for r in requests
     )
     properties = [call.kwargs["properties"] for call in analytics.capture.call_args_list]
-    assert {p["prompt_name"] for p in properties} == {"hydration.consolidate", "hydration.verify"}
+    assert {p["prompt_name"] for p in properties} == {"hydration.organize", "hydration.verify"}
     assert all(
         p["$ai_trace_id"] == "trace" and p["$ai_session_id"] == "session" for p in properties
     )
@@ -497,10 +509,7 @@ async def test_hydration_limits_provider_call_duration(monkeypatch):
         await asyncio.Event().wait()
 
     compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
-    episode = dict(uuid="ep", valid_at="2026-11-01")
-    with pytest.raises(TimeoutError):
-        await compiler.group(
-            compiler.fact_candidates(
-                [episode], [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
-            )
-        )
+    plan, reusable = await organize(
+        compiler.fact_candidates([dict(uuid="fact", fact="Martina es mi sobrina.")]), compiler.llm
+    )
+    assert not reusable and not plan["records"]

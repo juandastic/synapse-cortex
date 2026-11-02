@@ -1,43 +1,12 @@
 """Neo4j materialization, source revision checks and leased durable work queue."""
 
 import json
-import logging
 from dataclasses import asdict
 from uuid import uuid4
 
-from app.services.hydration_compiler import COMPILER_VERSION, WorkPending, digest, fact_hash
+from app.services.hydration_compiler import COMPILER_VERSION, fact_hash
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
-
-logger = logging.getLogger(__name__)
-
-STAMP_QUERY = """
- MATCH (e:Episodic {group_id:$user})
- WITH count(e) AS episodes, max(toString(e.created_at)) AS newest_episode,
- sum(size(coalesce(e.content,''))) AS episode_chars,
- sum(size(coalesce(e.summary,''))) AS summary_chars
- OPTIONAL MATCH (:Entity {group_id:$user})-[r:RELATES_TO {group_id:$user}]->(:Entity {group_id:$user})
- RETURN episodes,newest_episode,episode_chars,summary_chars,
- count(r) AS edges, count(r.expired_at) AS expired, count(r.invalid_at) AS invalid,
- sum(CASE WHEN r IS NOT NULL AND r.expired_at IS NULL AND (r.invalid_at IS NULL OR r.invalid_at>datetime())
-          THEN 1 ELSE 0 END) AS active,
- max(toString(r.created_at)) AS newest_edge,
- max(toString(r.expired_at)) AS newest_expiry,
- max(toString(r.invalid_at)) AS newest_invalidation,
- sum(size(coalesce(r.fact,''))) AS fact_chars
-"""
-EPISODES_QUERY = """
-MATCH (e:Episodic {group_id:$user})
-RETURN e.uuid AS uuid, e.source AS source, e.content AS content,e.name AS name,
-       toString(e.valid_at) AS valid_at
-ORDER BY e.valid_at
-"""
-EDGES_QUERY = """
-MATCH (a:Entity {group_id:$user})-[r:RELATES_TO {group_id:$user}]->(b:Entity {group_id:$user})
-WHERE r.expired_at IS NULL AND (r.invalid_at IS NULL OR r.invalid_at > datetime())
-RETURN r.uuid AS uuid, r.fact AS fact, r.episodes AS episodes,
-       toString(r.valid_at) AS valid_at,toString(r.invalid_at) AS invalid_at,
-       a.uuid AS source_uuid,b.uuid AS target_uuid
-"""
+from app.services.hydration_selection import HEAD_QUERY, VALIDATE_QUERY, select
 
 DELETE_HYDRATION_QUERY = """
 MATCH (n {user_id:$user})
@@ -58,13 +27,17 @@ class HydrationStore:
     async def initialize(self):
         await self.rows("""CREATE CONSTRAINT synapse_user_core_user IF NOT EXISTS
             FOR (n:SynapseUserCore) REQUIRE n.user_id IS UNIQUE""")
-        await self.rows("""CREATE CONSTRAINT synapse_hydration_selection_key IF NOT EXISTS
-            FOR (n:SynapseHydrationSelection) REQUIRE n.key IS UNIQUE""")
-        await self.rows("""CREATE INDEX synapse_hydration_selection_user IF NOT EXISTS
-            FOR (n:SynapseHydrationSelection) ON (n.user_id)""")
 
-    async def stamp(self, user):
-        return digest(await self.rows(STAMP_QUERY, user=user))
+    async def head(self, user):
+        rows = await self.rows(HEAD_QUERY, user=user)
+        return rows[0]["uuid"] if rows else None
+
+    async def select(self, user):
+        return await select(self, user)
+
+    async def validate(self, user, dependencies):
+        rows = await self.rows(VALIDATE_QUERY, user=user, ids=list(dependencies))
+        return {r["uuid"]: fact_hash(r) for r in rows} == dependencies
 
     async def request(self, user, *, invalidate=False, source_changed=False):
         await self.rows(
@@ -72,10 +45,10 @@ class HydrationStore:
         MERGE (n:SynapseUserCore {user_id:$user})
         ON CREATE SET n.hydration_generation=0
         SET n.hydration_lock = coalesce(n.hydration_lock,0)+1
-        WITH n, $invalidate OR $source_changed AS fresh
+        WITH n, $invalidate OR $source_changed OR coalesce(n.hydration_requested_compiler,'')<>$compiler AS fresh
         SET n.hydration_generation = CASE WHEN fresh
             THEN coalesce(n.hydration_generation,0)+1 ELSE coalesce(n.hydration_generation,0) END,
-            n.hydration_dirty = true,
+            n.hydration_dirty = true, n.hydration_requested_compiler=$compiler,
             n.hydration_retry_at = CASE WHEN fresh THEN 0 ELSE coalesce(n.hydration_retry_at,0) END,
             n.hydration_attempts=CASE WHEN fresh THEN 0 ELSE coalesce(n.hydration_attempts,0) END,
             n.hydration_failed_generation=CASE WHEN fresh THEN null ELSE n.hydration_failed_generation END,
@@ -85,6 +58,7 @@ class HydrationStore:
             user=user,
             invalidate=invalidate,
             source_changed=source_changed,
+            compiler=COMPILER_VERSION,
         )
 
     async def discard(self, user, revision):
@@ -172,38 +146,12 @@ class HydrationStore:
         payload = await self.current(user)
         if payload is None or payload["compiler"] != COMPILER_VERSION:
             return None
-        stamp_changed = payload["stamp"] != await self.stamp(user)
-        # Detect same-length edits or removal of selected evidence as well.
-        rows = await self.rows(
-            """MATCH (e:Episodic {group_id:$user}) WHERE e.uuid IN $ids
-            RETURN e.uuid AS uuid, e.content AS content, e.source AS source,
-                   toString(e.valid_at) AS valid_at,e.name AS name""",
-            user=user,
-            ids=list(payload["source_hashes"]),
-        )
-        actual = {r["uuid"]: digest(r) for r in rows}
-        if actual != payload["source_hashes"]:
+        if not await self.validate(user, payload["deps"]):
             await self.discard(user, payload["result"]["metadata"]["compilation_revision"])
             return None
-        covered = payload.get("edge_hashes", {})
-        if covered:
-            rows = await self.rows(
-                """MATCH (a:Entity {group_id:$user})
-                -[r:RELATES_TO {group_id:$user}]->(b:Entity {group_id:$user})
-                WHERE r.uuid IN $ids AND r.expired_at IS NULL
-                  AND (r.invalid_at IS NULL OR r.invalid_at>datetime())
-                RETURN r.uuid AS uuid,r.fact AS fact,
-                    toString(r.valid_at) AS valid_at,toString(r.invalid_at) AS invalid_at,
-                    a.uuid AS source_uuid,b.uuid AS target_uuid""",
-                user=user,
-                ids=list(covered),
-            )
-            if {r["uuid"]: fact_hash(r) for r in rows} != covered:
-                await self.discard(user, payload["result"]["metadata"]["compilation_revision"])
-                return None
-        if stamp_changed:
-            # New evidence is additive when all published dependencies still
-            # match. Serve the prepared version and enqueue its successor.
+        if payload["head_episode"] != await self.head(user):
+            # Recover a missed best-effort ingestion notification. Reads do not
+            # advance generation or interfere with a builder already in flight.
             await self.request(user)
         return self.result(payload)
 
@@ -259,29 +207,17 @@ class HydrationStore:
             terminal=terminal,
         )
 
-    async def snapshot(self, user):
-        episodes = await self.rows(EPISODES_QUERY, user=user)
-        edges = await self.rows(EDGES_QUERY, user=user)
-        return episodes, edges
-
-    async def publish(self, job, stamp, result, episodes, edges, *, seen_hashes, fact_sections):
+    async def publish(self, job, result, *, fingerprint, plan, dependencies, head):
         revision = str(uuid4())
         result.metadata.compilation_revision = revision
-        source_ids = set(result.metadata.included_episode_ids)
-        hashes = {e["uuid"]: digest(e) for e in episodes if e["uuid"] in source_ids}
         payload = json.dumps(
             {
                 "compiler": COMPILER_VERSION,
-                "stamp": stamp,
+                "fingerprint": fingerprint,
+                "llm": plan,
+                "deps": dependencies,
+                "head_episode": head,
                 "result": asdict(result),
-                "source_hashes": hashes,
-                "seen_hashes": seen_hashes,
-                "fact_sections": fact_sections,
-                "edge_hashes": {
-                    e["uuid"]: fact_hash(e)
-                    for e in edges
-                    if e["uuid"] in result.metadata.included_edge_ids
-                },
             },
             ensure_ascii=False,
         )
@@ -308,58 +244,4 @@ class HydrationStore:
             cache_model=result.provider_cache_model,
             cache_expires=result.provider_cache_expires_at,
         )
-        if rows:
-            try:
-                await self.rows(
-                    """MATCH (r:SynapseHydrationSelection {user_id:$user})
-                    WITH r ORDER BY coalesce(r.used_at,r.created_at) DESC SKIP 1000 DELETE r""",
-                    user=job["user"],
-                )
-            except Exception:
-                logger.warning(
-                    "Hydration retention cleanup failed after publication", exc_info=True
-                )
         return bool(rows)
-
-    def group_cache(self, job):
-        return GroupCache(self, job)
-
-
-class GroupCache:
-    """Durably cache grouping and verified consolidation within a two-call slice."""
-
-    def __init__(self, store, job):
-        self.store, self.job = store, job
-        self.calls = 0
-
-    async def load(self, fingerprint, *, calls=1, retry_epoch=None):
-        rows = await self.store.rows(
-            """MATCH (n:SynapseHydrationSelection {key:$key})
-            WHERE n.retry_epoch IS NULL OR n.retry_epoch=$retry_epoch
-            SET n.used_at=datetime() RETURN n.sections AS sections""",
-            key=digest([self.job["user"], fingerprint]),
-            retry_epoch=retry_epoch,
-        )
-        if rows and rows[0].get("sections") is not None:
-            return json.loads(rows[0]["sections"])
-        if self.calls + calls > 2:
-            raise WorkPending()
-        self.calls += calls
-        return None
-
-    async def save(self, fingerprint, sections, *, retry_epoch=None):
-        rows = await self.store.rows(
-            """MATCH (n:SynapseUserCore {user_id:$user,hydration_owner:$token})
-            SET n.hydration_lock=coalesce(n.hydration_lock,0)+1
-            WITH n WHERE n.hydration_generation=$generation AND n.hydration_lease_until>timestamp()
-            MERGE (s:SynapseHydrationSelection {key:$key})
-            SET s.user_id=$user,s.sections=$sections,s.created_at=datetime(),s.used_at=datetime(),
-                s.retry_epoch=$retry_epoch
-            RETURN s.key AS key""",
-            **self.job,
-            key=digest([self.job["user"], fingerprint]),
-            sections=json.dumps(sections),
-            retry_epoch=retry_epoch,
-        )
-        if not rows:
-            raise RuntimeError("Hydration grouping writer lost its lease or revision")

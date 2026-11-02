@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Discriminator, Field, Tag
+from pydantic import BaseModel, Discriminator, Field, Tag, model_serializer
 
 # =============================================================================
 # Ingest Endpoint Models
@@ -78,9 +78,16 @@ class GraphStatsResponse(BaseModel):
 
     entity_count: int = Field(..., description="Total Entity nodes in the graph")
     relationship_count: int = Field(..., description="Total valid RELATES_TO edges")
-    total_chars: int = Field(
-        default=0, description="Sum of all entity summaries + relationship facts in chars"
+    total_chars: int | None = Field(
+        default=0, description="Sum of all entity summaries + relationship facts, when measured"
     )
+
+    @model_serializer(mode="wrap")
+    def omit_unmeasured_size(self, handler):
+        data = handler(self)
+        if self.total_chars is None:
+            data.pop("total_chars", None)
+        return data
 
 
 class IngestStatusResponse(BaseModel):
