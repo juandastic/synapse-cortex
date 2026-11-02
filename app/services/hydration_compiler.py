@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 
-COMPILER_VERSION = "fact-backed-6"
+COMPILER_VERSION = "fact-backed-7"
 SELECTION_CACHE_VERSION = "fact-backed-4"
 logger = logging.getLogger(__name__)
 EXTRACTION_VERSION = "extractive-1"
@@ -355,8 +355,10 @@ class HydrationCompiler:
         # Round-robin by section prevents one large section from exhausting the budget.
         queues = {}
         for candidate in selected:
-            section = normalize(candidate.get("fact_section") or "")[:80] or "Otros recuerdos"
-            queues.setdefault(section, []).append(candidate)
+            section = normalize(candidate.get("fact_section") or "")[:80] or (
+                "Correcciones del usuario" if candidate.get("correction") else "Otros recuerdos"
+            )
+            queues.setdefault(section, []).append({**candidate, "fact_section": section})
         lines = {section: [] for section in queues}
         while any(queues.values()):
             for section, queue in queues.items():

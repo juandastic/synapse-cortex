@@ -381,6 +381,22 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
     assert grouped.metadata.included_edge_ids == ["medication"]
 
 
+def test_mandatory_correction_keeps_an_explicit_group_when_model_did_not_select_it():
+    compiler = HydrationCompiler(None)
+    quote = {**evidence(text="Julia es mi prima."), "correction": True}
+    facts = [edge("cousin", "Julia es mi prima.")]
+    candidates = compiler.fact_candidates([quote], facts)
+    result, retained = compiler.render(candidates, facts, GraphStats(2, 1))
+    assert "Correcciones del usuario" in result.compilation_text
+    assert retained[0]["fact_section"] == "Correcciones del usuario"
+    assert result.metadata.included_edge_ids == ["cousin"]
+    # Explicit topics assigned by the model still take precedence.
+    candidates[0]["fact_section"] = "Mi prima Julia"
+    result, retained = compiler.render(candidates, facts, GraphStats(2, 1))
+    assert "Mi prima Julia" in result.compilation_text
+    assert retained[0]["fact_section"] == "Mi prima Julia"
+
+
 async def test_poison_extraction_is_quarantined_and_yields_without_blocking_other_batches():
     ep = dict(uuid="a", source="message", valid_at="2026-11-01", content="User: Vivo en Bogotá.")
     source = sources_from_episodes([ep])[0]
