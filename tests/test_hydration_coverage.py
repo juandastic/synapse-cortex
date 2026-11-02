@@ -1,0 +1,414 @@
+import json
+from dataclasses import asdict
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.services.hydration_compiler import (
+    COMPILER_VERSION,
+    HydrationCompiler,
+    WorkPending,
+    digest,
+    fact_hash,
+    sources_from_episodes,
+)
+from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
+from app.services.hydration_store import GroupCache, HydrationStore
+from app.services.persisted_hydration import PersistedHydration
+
+
+def archive(count=240):
+    episodes = [
+        dict(
+            uuid="ep",
+            source="message",
+            valid_at="2026-11-02",
+            content="User: Mi historia personal completa.",
+        )
+    ]
+    sources = [asdict(s) for s in sources_from_episodes(episodes)]
+    facts = [
+        dict(
+            uuid=f"fact-{i:04}",
+            fact=f"Detalle personal {i}: fecha 2026-11-02, importe {1000 + i} y persona Julia.",
+            episodes=["ep"],
+            source_uuid="user",
+            target_uuid=f"topic-{i}",
+            valid_at="2026-11-02",
+        )
+        for i in range(count)
+    ]
+    return episodes, sources, facts
+
+
+async def test_grouping_keeps_more_than_180_facts_even_when_model_omits_most_ids():
+    _, sources, facts = archive()
+    llm = SimpleNamespace(
+        generate_response=AsyncMock(
+            return_value={
+                "groups": [
+                    {"title": "Detalles personales", "ids": ["fact-0000"]},
+                    {"title": "No existe", "ids": ["invented"]},
+                ]
+            }
+        )
+    )
+    compiler = HydrationCompiler(llm)
+    candidates = compiler.fact_candidates(sources, facts)
+    grouped = await compiler.group(candidates)
+    result, retained = compiler.render(grouped, facts, GraphStats(241, 240))
+    assert len(retained) == 240
+    assert set(result.metadata.included_edge_ids) == {f["uuid"] for f in facts}
+    assert all(f["fact"] in result.compilation_text for f in facts)
+    assert "No existe" not in result.compilation_text
+    assert llm.generate_response.await_count > 1
+    # Batches split work, never reduce the candidate set.
+    offered = [
+        fact
+        for call in llm.generate_response.await_args_list
+        for fact in json.loads(call.args[0][1].content)["facts"]
+    ]
+    assert {f["id"] for f in offered} == {f["uuid"] for f in facts}
+
+
+def test_candidates_keep_all_episode_details_without_a_quote_extraction_gate():
+    episodes, sources, facts = archive(45)
+    compiler = HydrationCompiler(None)
+    candidates = compiler.fact_candidates(sources, facts, episode_ids={e["uuid"] for e in episodes})
+    assert len(candidates) == 45
+    assert {c["quote"] for c in candidates} == {f["fact"] for f in facts}
+
+
+def test_only_exact_duplicates_with_same_subject_and_temporal_fields_are_merged():
+    _, sources, facts = archive(1)
+    first = facts[0]
+    duplicate = {**first, "uuid": "duplicate"}
+    changed_date = {**first, "uuid": "different-date", "valid_at": "2025-01-01"}
+    changed_person = {**first, "uuid": "different-person", "source_uuid": "cousin"}
+    changed_detail = {
+        **first,
+        "uuid": "different-detail",
+        "fact": first["fact"].replace("1000", "1001"),
+    }
+    facts = [first, duplicate, changed_date, changed_person, changed_detail]
+    compiler = HydrationCompiler(None)
+    candidates = compiler.fact_candidates(sources, facts)
+    result, retained = compiler.render(candidates, facts, GraphStats(2, 5))
+    assert len(retained) == 4
+    assert set(result.metadata.included_edge_ids) == {f["uuid"] for f in facts}
+    assert "2025-01-01" in result.compilation_text
+    assert changed_detail["fact"] in result.compilation_text
+
+
+def test_excluded_episodes_and_retired_facts_do_not_return_but_orphan_graph_facts_survive():
+    episodes = [
+        dict(
+            uuid="test",
+            source="message",
+            content="User: Prueba técnica de integración: no guardes esto.",
+            valid_at="2026-11-02",
+        ),
+        dict(
+            uuid="real",
+            source="message",
+            content="User: Mi prima Julia estudia ingeniería.",
+            valid_at="2026-11-02",
+        ),
+    ]
+    facts = [
+        dict(uuid="test-fact", fact="Qwen está desplegado", episodes=["test"]),
+        dict(uuid="real-fact", fact="Mi prima Julia estudia ingeniería.", episodes=["real"]),
+        dict(uuid="old-fact", fact="Julia es mi hija", episodes=["real"], active=False),
+        dict(uuid="orphan", fact="Julia vive en Bogotá.", episodes=[]),
+    ]
+    candidates = HydrationCompiler(None).fact_candidates(
+        [asdict(s) for s in sources_from_episodes(episodes)], facts, episode_ids={"test", "real"}
+    )
+    assert {c["id"] for c in candidates} == {"real-fact", "orphan"}
+
+
+async def test_incremental_grouping_preserves_all_unchanged_details_and_only_classifies_delta():
+    _, sources, facts = archive(220)
+    compiler = HydrationCompiler(None)
+    candidates = compiler.fact_candidates(sources, facts)
+    hashes = {c["id"]: digest(c) for c in candidates}
+    previous = dict(
+        compiler=COMPILER_VERSION,
+        selected=[{**c, "fact_section": "Historia detallada"} for c in candidates],
+        seen_hashes=hashes,
+        fact_sections={c["id"]: "Historia detallada" for c in candidates},
+    )
+    store = SimpleNamespace(current=AsyncMock(return_value=previous), group_cache=lambda job: None)
+    service = PersistedHydration(store, compiler, None)
+    compiler.group = AsyncMock(
+        side_effect=lambda items, **kwargs: [{**c, "fact_section": "Nuevo proyecto"} for c in items]
+    )
+    new = {
+        **candidates[0],
+        "id": "new",
+        "fact_id": "new",
+        "quote": "Mi proyecto empieza el 15 de diciembre.",
+    }
+    grouped, _ = await service._group_incremental(
+        {"user": "owner", "generation": 1}, candidates + [new]
+    )
+    assert len(grouped) == 221
+    assert [c["id"] for c in compiler.group.await_args.args[0]] == ["new"]
+    assert all(c["fact_section"] == "Historia detallada" for c in grouped if c["id"] != "new")
+
+
+def test_budget_is_the_only_size_cutoff_and_never_truncates_a_retained_fact():
+    _, sources, facts = archive(20)
+    compiler = HydrationCompiler(None, char_budget=1200)
+    candidates = compiler.fact_candidates(sources, facts)
+    result, retained = compiler.render(candidates, facts, GraphStats(21, 20))
+    assert 0 < len(retained) < 20
+    assert len(result.compilation_text) <= 1200
+    assert all(c["quote"] in result.compilation_text for c in retained)
+    assert set(result.metadata.included_edge_ids) == {c["fact_id"] for c in retained}
+
+
+async def test_large_archive_resumes_cached_grouping_without_reducing_or_repaying_batches():
+    _, sources, facts = archive(350)
+    saved = {}
+
+    async def rows(query, **params):
+        if "RETURN n.sections" in query:
+            return [{"sections": saved[params["key"]]}] if params["key"] in saved else []
+        saved[params["key"]] = params["sections"]
+        return [{"key": params["key"]}]
+
+    async def classify(messages, **kwargs):
+        batch = json.loads(messages[1].content)["facts"]
+        return {"groups": [{"title": "Historia detallada", "ids": [c["id"] for c in batch]}]}
+
+    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=classify))
+    compiler = HydrationCompiler(llm)
+    candidates = compiler.fact_candidates(sources, facts)
+    store = SimpleNamespace(rows=rows)
+    for _ in range(2):
+        try:
+            grouped = await compiler.group(candidates, cache=GroupCache(store, {"user": "owner"}))
+            break
+        except WorkPending:
+            pass
+    else:
+        raise AssertionError("Bounded grouping never finished")
+    assert len(grouped) == 350
+    assert llm.generate_response.await_count == 4
+    assert len(saved) == 4
+
+
+@pytest.mark.parametrize("mutation", ["deleted_alias", "changed_subject", "changed_detail"])
+async def test_duplicate_coverage_revokes_snapshot_if_any_covered_record_changes(mutation):
+    rows = [
+        dict(
+            uuid=fid,
+            fact="Julia es mi prima.",
+            source_uuid="user",
+            target_uuid="julia",
+            valid_at="2026-01-01",
+            invalid_at=None,
+        )
+        for fid in ["primary", "duplicate"]
+    ]
+    result = HydrationResult(
+        "Julia es mi prima.",
+        CompilationMetadata(True, 5, compilation_revision="rev"),
+        GraphStats(2, 2),
+    )
+    store = HydrationStore(None)
+    store.current = AsyncMock(
+        return_value=dict(
+            compiler=COMPILER_VERSION,
+            stamp="stamp",
+            result=asdict(result),
+            source_hashes={},
+            edge_hashes={r["uuid"]: fact_hash(r) for r in rows},
+        )
+    )
+    store.stamp = AsyncMock(return_value="stamp")
+    store.rows = AsyncMock(side_effect=[[], rows])
+    store.discard = AsyncMock()
+    assert await store.read("owner")
+    changed = [dict(r) for r in rows]
+    if mutation == "deleted_alias":
+        changed.pop()
+    elif mutation == "changed_subject":
+        changed[1]["source_uuid"] = "someone-else"
+    else:
+        changed[1]["fact"] = "Julia es mi hermana."
+    store.rows.side_effect = [[], changed]
+    assert await store.read("owner") is None
+    store.discard.assert_awaited_once_with("owner", "rev")
+
+
+async def test_mixed_episode_can_exclude_only_flagged_test_facts_without_losing_personal_details():
+    episodes = [
+        dict(
+            uuid="mixed",
+            source="message",
+            valid_at="2026-11-02",
+            content="User: Prueba técnica: recuerda ORBIT-42. No guardes este mensaje.\n\n"
+            "User: Mi prima Julia estudia ingeniería desde 2019 y el viernes tengo una prueba de sangre.",
+        ),
+        dict(
+            uuid="clean",
+            source="message",
+            valid_at="2026-11-02",
+            content="User: Mi gato se llama Leo.",
+        ),
+    ]
+    facts = [
+        dict(uuid="test", fact="El código de prueba es ORBIT-42.", episodes=["mixed"]),
+        dict(
+            uuid="cousin", fact="Mi prima Julia estudia ingeniería desde 2019.", episodes=["mixed"]
+        ),
+        dict(uuid="blood", fact="El viernes tengo una prueba de sangre.", episodes=["mixed"]),
+        dict(uuid="cat", fact="Mi gato se llama Leo.", episodes=["clean"]),
+    ]
+    compiler = HydrationCompiler(
+        SimpleNamespace(
+            generate_response=AsyncMock(
+                return_value={
+                    "groups": [{"title": "Familia y salud", "ids": ["cousin", "blood", "cat"]}],
+                    "excluded_ids": ["test", "cat", "invented"],
+                }
+            )
+        )
+    )
+    candidates = compiler.fact_candidates(
+        [asdict(s) for s in sources_from_episodes(episodes)],
+        facts,
+        episode_ids={e["uuid"] for e in episodes},
+    )
+    grouped = await compiler.group(candidates)
+    result, _ = compiler.render(grouped, facts, GraphStats(3, 4))
+    assert set(result.metadata.included_edge_ids) == {"cousin", "blood", "cat"}
+    assert "ORBIT-42" not in result.compilation_text
+    assert "2019" in result.compilation_text and "prueba de sangre" in result.compilation_text
+
+
+def test_budget_prioritizes_recently_shared_biography_over_event_dates_and_unknown_dates():
+    facts = [
+        dict(
+            uuid="biography",
+            fact="En 2019 estudié química en el CES.",
+            episodes=["recent"],
+            valid_at="2019-01-01",
+        ),
+        dict(
+            uuid="event",
+            fact="Ayer compré una libreta azul.",
+            episodes=["older"],
+            valid_at="2026-11-02",
+        ),
+        dict(uuid="unknown", fact="Un recuerdo de procedencia desconocida.", episodes=[]),
+    ]
+    sources = [
+        dict(episode_id="recent", date="2026-11-02"),
+        dict(episode_id="older", date="2026-10-01"),
+    ]
+    compiler = HydrationCompiler(None)
+    candidates = compiler.fact_candidates(sources, facts)
+    full, _ = compiler.render([candidates[0]], facts, GraphStats(1, 3))
+    result, retained = HydrationCompiler(None, char_budget=len(full.compilation_text)).render(
+        candidates, facts, GraphStats(1, 3)
+    )
+    assert [c["id"] for c in retained] == ["biography"]
+    assert "2019" in result.compilation_text
+
+
+def test_duplicate_primary_id_does_not_depend_on_database_row_order():
+    _, sources, facts = archive(1)
+    facts.append({**facts[0], "uuid": "duplicate"})
+    compiler = HydrationCompiler(None)
+    assert compiler.fact_candidates(sources, facts) == compiler.fact_candidates(
+        sources, list(reversed(facts))
+    )
+
+
+async def test_new_conversation_appends_grouping_work_without_reclassifying_cached_archive():
+    _, sources, facts = archive(1000)
+    saved = {}
+    cache = SimpleNamespace(load=AsyncMock(side_effect=lambda key: saved.get(key)))
+
+    async def save(key, sections):
+        saved[key] = sections
+
+    async def classify(messages, **kwargs):
+        batch = json.loads(messages[1].content)["facts"]
+        return {"groups": [{"title": "Historia personal", "ids": [c["id"] for c in batch]}]}
+
+    cache.save = save
+    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=classify))
+    compiler = HydrationCompiler(llm)
+    candidates = compiler.fact_candidates(sources, facts)
+    await compiler.group(candidates, cache=cache)
+    first_calls = llm.generate_response.await_count
+    new = {
+        **candidates[0],
+        "id": "000-new",
+        "fact_id": "000-new",
+        "date": "2026-11-03",
+        "quote": "Mi nuevo proyecto empieza mañana.",
+    }
+    grouped = await compiler.group([new] + candidates, cache=cache)
+    assert len(grouped) == 1001
+    assert llm.generate_response.await_count == first_calls + 1
+
+
+async def test_missing_titles_can_be_retried_on_a_later_generation_without_losing_facts():
+    _, sources, facts = archive(1)
+    saved = {}
+    cache = SimpleNamespace(load=AsyncMock(side_effect=lambda key: saved.get(key)))
+
+    async def save(key, sections):
+        saved[key] = sections
+
+    cache.save = save
+    llm = SimpleNamespace(
+        generate_response=AsyncMock(
+            side_effect=[
+                {"groups": []},
+                {"groups": [{"title": "Detalles personales", "ids": [facts[0]["uuid"]]}]},
+            ]
+        )
+    )
+    compiler = HydrationCompiler(llm)
+    candidates = compiler.fact_candidates(sources, facts)
+    first = await compiler.group(candidates, cache=cache, retry_epoch=1)
+    assert first[0]["classification_fallback"]
+    again = await compiler.group(candidates, cache=cache, retry_epoch=1)
+    assert again[0]["quote"] == first[0]["quote"]
+    assert llm.generate_response.await_count == 1
+    later = await compiler.group(candidates, cache=cache, retry_epoch=2)
+    assert later[0]["fact_section"] == "Detalles personales"
+    assert not later[0]["classification_fallback"]
+    assert llm.generate_response.await_count == 2
+
+
+async def test_explicitly_excluded_only_archive_does_not_fall_back_to_technical_memory():
+    _, sources, facts = archive(1)
+    compiler = HydrationCompiler(
+        SimpleNamespace(
+            generate_response=AsyncMock(
+                return_value={
+                    "groups": [],
+                    "excluded_ids": [facts[0]["uuid"]],
+                }
+            )
+        )
+    )
+    candidates = compiler.fact_candidates(sources, facts)
+    candidates[0]["excluded_context"] = [
+        {"id": "test", "text": "Prueba técnica: no guardes este mensaje."}
+    ]
+    grouped = await compiler.group(candidates)
+    service = PersistedHydration(
+        None, compiler, SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1)))
+    )
+    result, retained = await service._render_guarded("owner", sources, candidates, grouped, facts)
+    assert result.compilation_text == ""
+    assert not retained and not result.metadata.included_edge_ids

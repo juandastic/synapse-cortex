@@ -11,13 +11,12 @@ from app.services.hydration import HydrationService
 from app.services.hydration_compiler import (
     COMPILER_VERSION,
     HydrationCompiler,
-    UnverifiableEvidence,
     WorkPending,
     digest,
     sources_from_episodes,
 )
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
-from app.services.hydration_store import HydrationStore, SelectionCache
+from app.services.hydration_store import GroupCache, HydrationStore
 from app.services.notion_correction import CorrectionItem, NotionCorrectionService
 from app.services.persisted_hydration import PersistedHydration, UnsupportedArchive
 
@@ -213,53 +212,16 @@ async def test_argon_refresh_never_uses_the_prepared_explicit_cache():
 
 async def test_selector_reuses_cached_decisions_and_yields_before_third_uncached_call():
     store = SimpleNamespace(rows=AsyncMock(return_value=[]))
-    cache = SelectionCache(store, dict(user="owner", token="lease", generation=1))
+    cache = GroupCache(store, dict(user="owner", token="lease", generation=1))
     assert await cache.load("one") is None
     assert await cache.load("two") is None
     with pytest.raises(WorkPending):
         await cache.load("three")
-    store.rows.return_value = [dict(ids=["fact"])]
-    assert await cache.load("already-cached") == ["fact"]
+    store.rows.return_value = [dict(sections='{"fact":"Mi gato"}')]
+    assert await cache.load("already-cached") == {"fact": "Mi gato"}
+    store.rows.return_value = []
     with pytest.raises(WorkPending):
-        await cache.load("legacy-needs-classification", require_sections=True)
-
-
-async def test_incremental_selection_uses_previous_context_plus_changed_facts_only():
-    ep = dict(
-        uuid="a", source="message", valid_at="2026-11-01", content="User: " + evidence()["quote"]
-    )
-    source = sources_from_episodes([ep])[0]
-    compiler = HydrationCompiler(
-        SimpleNamespace(generate_response=AsyncMock(return_value=dict(ids=["old0", "new"])))
-    )
-    oldedges = [edge(f"old{i}", f"Personal fact {i}") for i in range(100)]
-    old_candidates = compiler.fact_candidates([evidence()], oldedges)
-    previous = dict(
-        compiler=COMPILER_VERSION,
-        selected=old_candidates[:3],
-        seen_hashes={c["id"]: digest(c) for c in old_candidates},
-    )
-    store = SimpleNamespace(
-        stamp=AsyncMock(return_value="stamp"),
-        snapshot=AsyncMock(
-            return_value=([ep], oldedges + [edge("new", "A newly mentioned project")])
-        ),
-        prune_sources=AsyncMock(),
-        cached_sources=AsyncMock(return_value={source.id: (source.hash, [evidence()])}),
-        current=AsyncMock(return_value=previous),
-        selection_cache=lambda job: None,
-        publish=AsyncMock(return_value=True),
-    )
-    service = PersistedHydration(
-        store,
-        compiler,
-        SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 101))),
-    )
-    assert await service.build(dict(user="owner", token="lease", generation=1))
-    import json
-
-    offered = json.loads(compiler.llm.generate_response.await_args.args[0][1].content)
-    assert {c["id"] for c in offered} == {"old0", "old1", "old2", "new"}
+        await cache.load("another-uncached-batch")
 
 
 @pytest.mark.parametrize("previous_state", ["unchanged", "selected_removed", "old_version"])
@@ -267,7 +229,6 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
     ep = dict(
         uuid="a", source="message", valid_at="2026-11-01", content="User: Mi gato se llama Leo."
     )
-    source = sources_from_episodes([ep])[0]
     facts = [edge("cat", "Mi gato se llama Leo.")]
     compiler = HydrationCompiler(
         SimpleNamespace(generate_response=AsyncMock(return_value={"ids": ["cat"]}))
@@ -277,18 +238,18 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
         compiler=COMPILER_VERSION,
         selected=[{**candidates[0], "fact_section": "Mi gato Leo"}],
         seen_hashes={c["id"]: digest(c) for c in candidates},
+        fact_sections={c["id"]: "Mi gato Leo" for c in candidates},
     )
     if previous_state == "selected_removed":
         previous["selected"] = [{"id": "retired"}]
+        previous["fact_sections"] = {}
     elif previous_state == "old_version":
         previous["compiler"] = "older-compiler"
     store = SimpleNamespace(
         stamp=AsyncMock(return_value="stamp"),
         snapshot=AsyncMock(return_value=([ep], facts)),
-        prune_sources=AsyncMock(),
-        cached_sources=AsyncMock(return_value={source.id: (source.hash, [evidence()])}),
         current=AsyncMock(return_value=previous),
-        selection_cache=lambda job: None,
+        group_cache=lambda job: None,
         publish=AsyncMock(return_value=True),
     )
     service = PersistedHydration(
@@ -353,13 +314,13 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
             generate_response=AsyncMock(
                 return_value={
                     "ids": ["medication"],
-                    "sections": [{"id": "medication", "section": "Situación reciente"}],
+                    "groups": [{"title": "Situación reciente", "ids": ["medication"]}],
                 }
             )
         )
     )
     facts = [edge("medication", "La prima toma el medicamento X")]
-    selected = await compiler.select(compiler.fact_candidates([quote], facts))
+    selected = await compiler.group(compiler.fact_candidates([quote], facts))
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Situación reciente" in result.compilation_text
     assert "Preferencias de interacción" not in result.compilation_text
@@ -372,9 +333,9 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
     assert "Otros recuerdos" in unclassified.compilation_text
     compiler.llm.generate_response.return_value = {
         "ids": ["medication"],
-        "sections": [{"id": "medication", "section": "Acompañamiento a mi prima"}],
+        "groups": [{"title": "Acompañamiento a mi prima", "ids": ["medication"]}],
     }
-    selected = await compiler.select(compiler.fact_candidates([quote], facts))
+    selected = await compiler.group(compiler.fact_candidates([quote], facts))
     grouped, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Acompañamiento a mi prima" in grouped.compilation_text
     assert "Otros recuerdos" not in grouped.compilation_text
@@ -395,26 +356,6 @@ def test_mandatory_correction_keeps_an_explicit_group_when_model_did_not_select_
     result, retained = compiler.render(candidates, facts, GraphStats(2, 1))
     assert "Mi prima Julia" in result.compilation_text
     assert retained[0]["fact_section"] == "Mi prima Julia"
-
-
-async def test_poison_extraction_is_quarantined_and_yields_without_blocking_other_batches():
-    ep = dict(uuid="a", source="message", valid_at="2026-11-01", content="User: Vivo en Bogotá.")
-    source = sources_from_episodes([ep])[0]
-    store = SimpleNamespace(
-        stamp=AsyncMock(return_value="stamp"),
-        snapshot=AsyncMock(return_value=([ep], [])),
-        prune_sources=AsyncMock(),
-        cached_sources=AsyncMock(return_value={}),
-        save_sources=AsyncMock(),
-    )
-    compiler = SimpleNamespace(extract=AsyncMock(side_effect=UnverifiableEvidence()))
-    service = PersistedHydration(store, compiler, None)
-    job = dict(user="owner", token="lease", generation=1)
-    with pytest.raises(WorkPending):
-        await service.build(job)
-    store.save_sources.assert_awaited_once_with(
-        job, [source], [], quarantine_reason="nonliteral_quotes"
-    )
 
 
 @pytest.mark.parametrize("kind", ["explorer", "notion"])

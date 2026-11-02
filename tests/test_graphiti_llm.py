@@ -382,22 +382,8 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         payload = json.loads(request.content)
         requests.append(payload)
         schema = payload["response_format"]["json_schema"]
-        if schema["name"] == "Extraction":
-            answer = {
-                "spans": [
-                    {
-                        "source_id": source.id,
-                        "quote": source.text,
-                        "section": "Personas y vínculos",
-                        "kind": "relato",
-                    }
-                ]
-            }
-        else:
-            answer = {
-                "ids": ["fact"],
-                "sections": [{"id": "fact", "section": "Personas y vínculos"}],
-            }
+        assert schema["name"] == "Grouping"
+        answer = {"groups": [{"title": "Personas y vínculos", "ids": ["fact"]}]}
         return httpx.Response(
             200,
             json=completion(
@@ -416,12 +402,11 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
     compiler = HydrationCompiler(hydration_client)
     facts = [dict(uuid="fact", fact=source.text, episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
-        quotes = await compiler.extract([source])
-        selected = await compiler.select(compiler.fact_candidates(quotes, facts))
+        selected = await compiler.group(compiler.fact_candidates([vars(source)], facts))
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Martina es mi sobrina" in result.compilation_text
     assert result.metadata.included_edge_ids == ["fact"]
-    assert len(requests) == 2
+    assert len(requests) == 1
 
     def assert_strict_objects(schema):
         if isinstance(schema, dict):
@@ -439,7 +424,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert request["reasoning"]["effort"] == "low"
         assert request["response_format"]["json_schema"]["strict"] is True
         assert_strict_objects(request["response_format"]["json_schema"]["schema"])
-    assert analytics.capture.call_count == 2
+    assert analytics.capture.call_count == 1
     names = set()
     for call in analytics.capture.call_args_list:
         assert call.kwargs["distinct_id"] == "owner"
@@ -449,7 +434,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert props["$ai_provider"] == "openrouter"
         assert props["$ai_total_cost_usd"] == 0.001
         names.add(props["prompt_name"])
-    assert names == {"hydration.extract", "hydration.select"}
+    assert names == {"hydration.group"}
 
 
 async def test_hydration_limits_provider_call_duration(monkeypatch):
@@ -461,4 +446,8 @@ async def test_hydration_limits_provider_call_duration(monkeypatch):
     compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
     source = Source("ep:0:0", "ep", "2026-11-01", "usuario", "Martina es mi sobrina.")
     with pytest.raises(TimeoutError):
-        await compiler.extract([source])
+        await compiler.group(
+            compiler.fact_candidates(
+                [vars(source)], [dict(uuid="fact", fact=source.text, episodes=["ep"])]
+            )
+        )

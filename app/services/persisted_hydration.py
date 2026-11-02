@@ -3,14 +3,13 @@
 import asyncio
 import logging
 import time
+from dataclasses import asdict
 
-from app.core.observability import anonymize_id
 from app.core.posthog import posthog_user_context
 from app.services.hydration_compiler import (
-    BATCH_CHARS,
     COMPILER_VERSION,
+    EXCLUDED_SECTION,
     HydrationCompiler,
-    UnverifiableEvidence,
     WorkPending,
     digest,
     sources_from_episodes,
@@ -80,105 +79,69 @@ class PersistedHydration:
         episodes, edges = await self.store.snapshot(user)
         sources = sources_from_episodes(episodes)
         with posthog_user_context(user):
-            quotes = await self._cached_quotes_or_extract(job, sources)
-            candidates = self.compiler.fact_candidates(quotes, edges)
-            selected, seen_hashes = await self._select_incremental(job, candidates)
-        result, retained = await self._render_guarded(user, sources, candidates, selected, edges)
+            candidates = self.compiler.fact_candidates(
+                [asdict(source) for source in sources],
+                edges,
+                episode_ids={episode["uuid"] for episode in episodes},
+            )
+            grouped, seen_hashes = await self._group_incremental(job, candidates)
+        result, retained = await self._render_guarded(user, sources, candidates, grouped, edges)
         return await self._publish_if_unchanged(
-            job, stamp, result, retained, episodes, edges, seen_hashes
+            job,
+            stamp,
+            result,
+            retained,
+            episodes,
+            edges,
+            seen_hashes,
+            {c["id"]: c["fact_section"] for c in grouped if not c.get("classification_fallback")},
         )
 
-    async def _cached_quotes_or_extract(self, job, sources) -> list[dict]:
-        await self.store.prune_sources(job, [s.id for s in sources])
-        cache = await self.store.cached_sources(job["user"])
-        quotes, pending = [], []
-        for source in sources:
-            if source.id in cache and cache[source.id][0] == source.hash:
-                quotes.extend(cache[source.id][1])
-            else:
-                pending.append(source)
-        batches, batch, size = [], [], 0
-        for source in pending:
-            if batch and size + len(source.text) > BATCH_CHARS:
-                batches.append(batch)
-                batch, size = [], 0
-            batch.append(source)
-            size += len(source.text)
-        if batch:
-            batches.append(batch)
-        logger.info(
-            "Hydration user=%s: %d changed batches, %d cached quotes",
-            anonymize_id(job["user"]),
-            len(batches),
-            len(quotes),
-        )
-        if not batches:
-            return quotes
-
-        async def extract_batch(batch):
-            try:
-                items = await self.compiler.extract(batch)
-            except UnverifiableEvidence:
-                logger.warning("Quarantining unverifiable hydration extraction batch")
-                await self.store.save_sources(job, batch, [], quarantine_reason="nonliteral_quotes")
-                return
-            await self.store.save_sources(job, batch, items)
-
-        # Persist at most two batches in parallel, then yield to other users.
-        async with asyncio.TaskGroup() as group:
-            for batch in batches[:2]:
-                group.create_task(extract_batch(batch))
-        raise WorkPending()
-
-    async def _select_incremental(self, job, candidates) -> tuple[list[dict], dict[str, str]]:
+    async def _group_incremental(self, job, candidates) -> tuple[list[dict], dict[str, str]]:
         previous = await self.store.current(job["user"]) or {}
         if previous.get("compiler") != COMPILER_VERSION:
             previous = {}
-
-        # Hash source facts before restoring their previous display categories.
-        seen_hashes = {candidate["id"]: digest(candidate) for candidate in candidates}
-        by_id = {candidate["id"]: candidate for candidate in candidates}
-        previous_ids = []
-        for item in previous.get("selected", []):
-            if item["id"] in by_id:
-                previous_ids.append(item["id"])
-                by_id[item["id"]]["fact_section"] = item.get("fact_section")
-        changed = [
-            candidate
-            for candidate in candidates
-            if previous.get("seen_hashes", {}).get(candidate["id"]) != seen_hashes[candidate["id"]]
-        ]
-        if previous_ids and not changed:
-            selected = [by_id[cid] for cid in previous_ids]
-        else:
-            wanted = set(previous_ids) | {candidate["id"] for candidate in changed}
-            pool = [candidate for candidate in candidates if candidate["id"] in wanted]
-            # If all resident facts disappeared, refill from the remaining archive.
-            selected = await self.compiler.select(
-                pool or candidates, cache=self.store.selection_cache(job)
+        seen_hashes = {c["id"]: digest(c) for c in candidates}
+        sections = previous.get("fact_sections", {})
+        pending = []
+        grouped = {}
+        for candidate in candidates:
+            cid = candidate["id"]
+            if previous.get("seen_hashes", {}).get(cid) == seen_hashes[cid] and sections.get(cid):
+                grouped[cid] = {
+                    **candidate,
+                    "fact_section": sections[cid],
+                    "excluded": sections[cid] == EXCLUDED_SECTION
+                    and bool(candidate.get("excluded_context"))
+                    and not candidate.get("correction"),
+                }
+            else:
+                pending.append(candidate)
+        if pending:
+            classified = await self.compiler.group(
+                pending,
+                cache=self.store.group_cache(job),
+                existing_groups=list(dict.fromkeys(sections.values())),
+                retry_epoch=job["generation"] if previous else None,
             )
-        corrections = [candidate for candidate in changed if candidate.get("correction")]
-        selected = list(
-            {candidate["id"]: candidate for candidate in corrections + selected}.values()
-        )[:180]
-        return selected, seen_hashes
+            grouped.update({c["id"]: c for c in classified})
+        return [grouped[c["id"]] for c in candidates], seen_hashes
 
-    async def _render_guarded(self, user, sources, candidates, selected, edges):
-        # Never replace a populated user's memory with an empty model response.
-        if candidates and not selected:
-            raise ValueError("No verifiable personal memory selected; keeping legacy hydration")
+    async def _render_guarded(self, user, sources, candidates, grouped, edges):
+        if candidates and not grouped:
+            raise ValueError("Grouping omitted every available fact; preserving legacy hydration")
         stats = await self.hydration_service.fetch_graph_stats(user)
-        if not selected and (sources or stats.entity_count or stats.relationship_count):
+        if not grouped and (sources or stats.entity_count or stats.relationship_count):
             raise UnsupportedArchive(
                 "Graph knowledge has no usable episodic evidence; preserving v2"
             )
-        result, retained = self.compiler.render(selected, edges, stats)
-        if selected and not result.compilation_text:
-            raise ValueError("Compilation budget omitted every selected claim")
+        result, retained = self.compiler.render(grouped, edges, stats)
+        if any(not c.get("excluded") for c in grouped) and not result.compilation_text:
+            raise ValueError("Compilation budget omitted every available fact")
         return result, retained
 
     async def _publish_if_unchanged(
-        self, job, stamp, result, retained, episodes, edges, seen_hashes
+        self, job, stamp, result, retained, episodes, edges, seen_hashes, fact_sections
     ) -> bool:
         if await self.store.stamp(job["user"]) != stamp:
             # Keep this job dirty. An old builder must not revoke a newer
@@ -202,7 +165,14 @@ class PersistedHydration:
         if await self.store.stamp(job["user"]) != stamp:
             return False
         return await self.store.publish(
-            job, stamp, result, retained, episodes, edges, seen_hashes=seen_hashes
+            job,
+            stamp,
+            result,
+            retained,
+            episodes,
+            edges,
+            seen_hashes=seen_hashes,
+            fact_sections=fact_sections,
         )
 
     async def run_one(self, user=None):
