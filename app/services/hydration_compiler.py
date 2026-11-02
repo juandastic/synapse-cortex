@@ -63,7 +63,7 @@ class Extraction(BaseModel):
 
 class Selection(BaseModel):
     ids: list[str]
-    sections: dict[str, Section] = Field(default_factory=dict)
+    sections: dict[str, str] = Field(default_factory=dict)
 
 
 class UnverifiableEvidence(ValueError):
@@ -328,7 +328,7 @@ class HydrationCompiler:
         key = digest([SELECTION_CACHE_VERSION, limit, candidates])
         lookup = {c["id"]: c for c in candidates}
         if cache is not None:
-            cached = await cache.load(key)
+            cached = await cache.load(key, require_sections=limit == 180)
             if cached is not None:
                 ids = cached["ids"] if isinstance(cached, dict) else cached
                 sections = cached.get("sections", {}) if isinstance(cached, dict) else {}
@@ -362,7 +362,11 @@ class HydrationCompiler:
             sections = {}
         else:
             ids = list(dict.fromkeys(selected.ids))[:limit]
-            sections = {cid: section for cid, section in selected.sections.items() if cid in ids}
+            sections = {
+                cid: section
+                for cid, section in selected.sections.items()
+                if cid in ids and section in SECTIONS
+            }
         if cache is not None:
             await cache.save(key, ids, sections=sections)
         return [{**lookup[cid], "fact_section": sections.get(cid)} for cid in ids]

@@ -221,6 +221,8 @@ async def test_selector_reuses_cached_decisions_and_yields_before_third_uncached
         await cache.load("three")
     store.rows.return_value = [dict(ids=["fact"])]
     assert await cache.load("already-cached") == ["fact"]
+    with pytest.raises(WorkPending):
+        await cache.load("legacy-needs-classification", require_sections=True)
 
 
 async def test_incremental_selection_uses_previous_context_plus_changed_facts_only():
@@ -328,6 +330,14 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
     selected[0].pop("fact_section")
     unclassified, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Registros sin clasificar" in unclassified.compilation_text
+    compiler.llm.generate_response.return_value = {
+        "ids": ["medication"],
+        "sections": {"medication": "Unrecognized category"},
+    }
+    selected = await compiler.select(compiler.fact_candidates([quote], facts))
+    neutral, _ = compiler.render(selected, facts, GraphStats(2, 1))
+    assert "Registros sin clasificar" in neutral.compilation_text
+    assert "Unrecognized category" not in neutral.compilation_text
 
 
 async def test_poison_extraction_is_quarantined_and_yields_without_blocking_other_batches():

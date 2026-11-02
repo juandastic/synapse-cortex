@@ -403,7 +403,7 @@ class SelectionCache:
         self.store, self.job = store, job
         self.calls = 0
 
-    async def load(self, fingerprint):
+    async def load(self, fingerprint, *, require_sections=False):
         rows = await self.store.rows(
             """MATCH (n:SynapseHydrationSelection {key:$key})
             RETURN n.ids AS ids,n.sections AS sections""",
@@ -412,11 +412,12 @@ class SelectionCache:
         if rows:
             if rows[0].get("sections"):
                 return {"ids": rows[0]["ids"], "sections": json.loads(rows[0]["sections"])}
-            return rows[0]["ids"]
+            if not require_sections:
+                return rows[0]["ids"]
         if self.calls >= 2:
             raise WorkPending()
         self.calls += 1
-        return None
+        return rows[0]["ids"] if rows else None
 
     async def save(self, fingerprint, ids, *, sections=None):
         rows = await self.store.rows(
