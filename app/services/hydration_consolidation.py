@@ -14,7 +14,21 @@ from pydantic import BaseModel
 from app.services import hydration_result
 
 logger = logging.getLogger(__name__)
-CONSOLIDATION_VERSION = "consolidation-3"
+CONSOLIDATION_VERSION = "consolidation-4"
+CONNECTORS = {"y", "e", "and"}
+NUMBER_WORDS = set(
+    """
+cero un una uno dos tres cuatro cinco seis siete ocho nueve diez once doce trece catorce
+quince dieciseis diecisiete dieciocho diecinueve veinte veintiuno veintiun veintidos
+veintitres veinticuatro veinticinco veintiseis veintisiete veintiocho veintinueve treinta
+cuarenta cincuenta sesenta setenta ochenta noventa cien ciento doscientos trescientos
+cuatrocientos quinientos seiscientos setecientos ochocientos novecientos mil miles
+millon millones billon billones medio media mitad docena
+zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen
+fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy
+eighty ninety hundred thousand million billion half dozen
+""".split()
+)
 SOURCE_FIELDS = (
     "id",
     "fact_id",
@@ -43,7 +57,8 @@ clínicos comprobados. No inventes nada para conectar registros. No repitas un I
 Propón solo enumeraciones paralelas con el mismo predicado. No fusiones ubicaciones
 alternativas ni explicaciones con estructuras distintas, aunque traten del mismo tema.
 Conserva literalmente todas las palabras del predicado y de cada elemento enumerado.
-Solo puedes añadir conectores 'y' o 'e' y puntuación, sin introducir palabras nuevas.
+Solo puedes añadir conectores 'y' o 'e' en español o 'and' en inglés y puntuación,
+sin introducir palabras nuevas. Conserva el idioma original de los hechos.
 Las fechas de procedencia y vigencia ya las añade el código; no las cambies.
 Devuelve records vacío ante cualquier duda."""
 VERIFY_PROMPT = """Audita la fidelidad de propuestas de consolidación de memoria.
@@ -104,7 +119,7 @@ def _details_preserved(text, facts):
         return False
     middle = actual[len(head) : len(actual) - len(tail) if tail else None]
     expected = Counter(word for slot in slots for word in slot)
-    observed = Counter(word for word in middle if word in expected or word not in {"y", "e"})
+    observed = Counter(word for word in middle if word in expected or word not in CONNECTORS)
     return observed == expected and all(
         any(middle[i : i + len(slot)] == slot for i in range(len(middle))) for slot in slots
     )
@@ -134,19 +149,65 @@ def _parallel_parts(facts):
     while suffix < shortest - prefix and len({words[-suffix - 1] for words in tokens}) == 1:
         suffix += 1
     slots = [words[prefix : len(words) - suffix if suffix else None] for words in tokens]
-    spatial = {"en", "sobre", "debajo", "junto", "detras", "delante", "lado", "entre"}
+    spatial = {
+        "en",
+        "sobre",
+        "debajo",
+        "junto",
+        "detras",
+        "delante",
+        "lado",
+        "entre",
+        "in",
+        "at",
+        "on",
+        "under",
+        "near",
+        "below",
+        "above",
+        "behind",
+        "between",
+        "beside",
+        "inside",
+        "outside",
+    }
     prefix_words = tokens[0][:prefix]
-    while prefix_words and prefix_words[-1] in {"el", "la", "los", "las", "un", "una", "the", "a"}:
+    while prefix_words and prefix_words[-1] in {
+        "el",
+        "la",
+        "los",
+        "las",
+        "un",
+        "una",
+        "the",
+        "a",
+        "an",
+    }:
         prefix_words = prefix_words[:-1]
     if prefix_words and prefix_words[-1] in spatial:
         return None
-    negation = {"no", "nunca", "jamas", "tampoco", "dejo", "ya", "not", "never", "stopped"}
+    negation = {
+        "no",
+        "nunca",
+        "jamas",
+        "tampoco",
+        "dejo",
+        "ya",
+        "not",
+        "never",
+        "stopped",
+        "without",
+    }
     raw_slots = [words[prefix : len(words) - suffix if suffix else None] for words in raw]
     eligible = (
         prefix >= 3
         and prefix + suffix >= 6
+        and not negation.intersection(tokens[0][:prefix])
         and all(
-            0 < len(slot) <= 4 and not (spatial | negation).intersection(slot) for slot in slots
+            0 < len(slot) <= 4
+            and not (spatial | negation | NUMBER_WORDS).intersection(slot)
+            and not any(NUMBER_WORDS.intersection(word.split("-")) for word in slot)
+            for slot in slots
         )
         and all(
             not any(word[0].isupper() or any(c.isdigit() for c in word) for word in slot)
@@ -240,10 +301,7 @@ async def _consolidate_batch(facts, llm, cache, retry_epoch):
             accepted = []
             failed = True
         if cache is not None:
-            if failed and retry_epoch is not None:
-                await cache.save(key, accepted, retry_epoch=retry_epoch)
-            else:
-                await cache.save(key, accepted)
+            await cache.save(key, accepted, retry_epoch=retry_epoch if failed else None)
     logger.info(
         "Hydration consolidation: %d source facts, %d verified merged records",
         len(facts),

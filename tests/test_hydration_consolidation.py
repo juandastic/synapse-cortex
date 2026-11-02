@@ -126,7 +126,7 @@ async def test_failed_verification_keeps_literals_and_cache_avoids_repeated_cost
     saved = {}
     cache = SimpleNamespace(load=AsyncMock(side_effect=lambda key, **kwargs: saved.get(key)))
 
-    async def save(key, value):
+    async def save(key, value, **kwargs):
         saved[key] = value
 
     cache.save = save
@@ -147,7 +147,7 @@ async def test_editing_any_source_changes_cache_key_and_rechecks_the_rewrite():
     saved = {}
     cache = SimpleNamespace(load=AsyncMock(side_effect=lambda key, **kwargs: saved.get(key)))
 
-    async def save(key, value):
+    async def save(key, value, **kwargs):
         saved[key] = value
 
     cache.save = save
@@ -343,3 +343,53 @@ async def test_model_approval_cannot_override_missing_items_invented_words_or_ch
     llm = client(text=text)
     assert await consolidate(facts(), llm) == facts()
     assert llm.generate_response.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "texts",
+    [
+        [
+            "Leidy dice que toma cincuenta miligramos de sertralina por la mañana.",
+            "Leidy dice que toma cinco miligramos de sertralina por la mañana.",
+        ],
+        [
+            "Leidy says she takes fifty-five milligrams of sertraline every morning.",
+            "Leidy says she takes five milligrams of sertraline every morning.",
+        ],
+        [
+            "Leidy no quiere volver a tomar sertralina por la mañana.",
+            "Leidy no quiere volver a tomar quetiapina por la mañana.",
+        ],
+        [
+            "Leidy says she lives in the city with her partner.",
+            "Leidy says she lives in the countryside with her partner.",
+        ],
+    ],
+)
+async def test_spelled_quantities_shared_negation_and_english_locations_remain_literal(texts):
+    original = [{**f, "quote": text} for f, text in zip(facts(), texts, strict=False)]
+    llm = client()
+    assert await consolidate(original, llm) == original
+    llm.generate_response.assert_not_awaited()
+
+
+async def test_parallel_english_enumeration_keeps_language_and_all_items():
+    original = [
+        {**f, "quote": f"Leidy experiences a physical reaction when seeing {insect}."}
+        for f, insect in zip(facts(), ["bees", "ants"], strict=False)
+    ]
+    llm = client()
+    llm.generate_response.side_effect = [
+        {
+            "records": [
+                {
+                    "text": "Leidy experiences a physical reaction when seeing bees and ants.",
+                    "ids": ["F1", "F2"],
+                }
+            ]
+        },
+        {"reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]},
+    ]
+    result = await consolidate(original, llm)
+    assert len(result) == 1 and "bees and ants" in result[0]["quote"]
+    assert {f["id"] for f in source_facts(result[0])} == {"f1", "f2"}
