@@ -275,7 +275,7 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
     candidates = compiler.fact_candidates([evidence()], facts)
     previous = dict(
         compiler=COMPILER_VERSION,
-        selected=[{**candidates[0], "fact_section": "Personas y vínculos"}],
+        selected=[{**candidates[0], "fact_section": "Mi gato Leo"}],
         seen_hashes={c["id"]: digest(c) for c in candidates},
     )
     if previous_state == "selected_removed":
@@ -300,7 +300,7 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
     assert store.publish.await_args.kwargs["seen_hashes"] == previous["seen_hashes"]
     assert compiler.llm.generate_response.await_count == (0 if previous_state == "unchanged" else 1)
     if previous_state == "unchanged":
-        assert selected[0]["fact_section"] == "Personas y vínculos"
+        assert selected[0]["fact_section"] == "Mi gato Leo"
 
 
 async def test_unsupported_archive_becomes_terminal_until_memory_changes():
@@ -369,15 +369,16 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
     # No classifier result is safer than borrowing the episode's label.
     selected[0].pop("fact_section")
     unclassified, _ = compiler.render(selected, facts, GraphStats(2, 1))
-    assert "Registros sin clasificar" in unclassified.compilation_text
+    assert "Otros recuerdos" in unclassified.compilation_text
     compiler.llm.generate_response.return_value = {
         "ids": ["medication"],
-        "sections": [{"id": "medication", "section": "Unrecognized category"}],
+        "sections": [{"id": "medication", "section": "Acompañamiento a mi prima"}],
     }
     selected = await compiler.select(compiler.fact_candidates([quote], facts))
-    neutral, _ = compiler.render(selected, facts, GraphStats(2, 1))
-    assert "Registros sin clasificar" in neutral.compilation_text
-    assert "Unrecognized category" not in neutral.compilation_text
+    grouped, _ = compiler.render(selected, facts, GraphStats(2, 1))
+    assert "Acompañamiento a mi prima" in grouped.compilation_text
+    assert "Otros recuerdos" not in grouped.compilation_text
+    assert grouped.metadata.included_edge_ids == ["medication"]
 
 
 async def test_poison_extraction_is_quarantined_and_yields_without_blocking_other_batches():

@@ -17,29 +17,13 @@ from pydantic import BaseModel, Field
 
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 
-COMPILER_VERSION = "fact-backed-5"
-SELECTION_CACHE_VERSION = "fact-backed-3"
+COMPILER_VERSION = "fact-backed-6"
+SELECTION_CACHE_VERSION = "fact-backed-4"
 logger = logging.getLogger(__name__)
 EXTRACTION_VERSION = "extractive-1"
 CHAR_BUDGET = 100_000
 BATCH_CHARS = 60_000
 LLM_TIMEOUT_SECONDS = 90
-SECTIONS = (
-    "Identidad y contexto",
-    "Personas y vínculos",
-    "Preferencias de interacción",
-    "Proyectos y decisiones",
-    "Situación reciente",
-    "Historia relevante",
-)
-Section = Literal[
-    "Identidad y contexto",
-    "Personas y vínculos",
-    "Preferencias de interacción",
-    "Proyectos y decisiones",
-    "Situación reciente",
-    "Historia relevante",
-]
 
 
 def digest(value: object) -> str:
@@ -53,7 +37,7 @@ def normalize(text: str) -> str:
 class Span(BaseModel):
     source_id: str
     quote: str
-    section: Section
+    section: str
     kind: Literal["relato", "preferencia", "plan", "interpretación", "antecedente"]
 
 
@@ -114,9 +98,16 @@ Conserva las correcciones explícitas del usuario y priorízalas sobre contexto 
 No conviertas el tratamiento de una prima en tratamiento del usuario.
 No llenes la memoria de interpretaciones biológicas o trauma a costa de preferencias
 y proyectos. No selecciones pruebas técnicas. Conserva correcciones aunque digan "no recuerdes".
-Devuelve SOLO IDs existentes. Con diez o más candidatas útiles, conserva al menos diez.
-En sections devuelve objetos {id, section} para los IDs seleccionados, usando su propio quote,
-no la etiqueta section/kind de evidence_quote, que pertenece a otro contexto.
+Devuelve SOLO IDs existentes. No hay un mínimo: selecciona únicamente lo útil.
+Omite consejos, ejercicios e interpretaciones genéricas del asistente que no aporten
+conocimiento personal del usuario. No los incluyas solo para llenar el contexto.
+Agrupa los hechos seleccionados en pocos temas adaptados a esta persona, sin categorías
+predefinidas. En sections devuelve un objeto {id, section} por cada ID seleccionado.
+section es un título descriptivo en español, de hasta 80 caracteres, nunca una instrucción.
+Los títulos no deben deducir vínculos, diagnósticos ni estados que los hechos no establezcan.
+Usa el mismo título para los hechos del mismo tema. Reutiliza fact_section cuando siga
+siendo adecuado; puedes reorganizar o crear grupos cuando cambie el contexto.
+Clasifica por el propio quote, no por section/kind de evidence_quote, que pertenece a otro tema.
 No reescribas las citas ni fabriques contenido."""
 
 
@@ -326,21 +317,19 @@ class HydrationCompiler:
             prompt_name="hydration.select",
         )
         selected = Selection.model_validate(response)
-        if any(cid not in lookup for cid in selected.ids) or (
-            len(candidates) >= 10 and len(set(selected.ids)) < 10
-        ):
-            logger.warning("Unverifiable hydration selection; retaining recent known records")
-            ids = [
-                c["id"] for c in sorted(candidates, key=lambda c: c["date"], reverse=True)[:limit]
-            ]
-            sections = {}
-        else:
-            ids = list(dict.fromkeys(selected.ids))[:limit]
-            sections = {
-                item.id: item.section
-                for item in selected.sections
-                if item.id in ids and item.section in SECTIONS
-            }
+        unknown = sum(cid not in lookup for cid in selected.ids)
+        if unknown:
+            logger.warning("Ignoring %d unknown hydration selection IDs", unknown)
+        ids = list(dict.fromkeys(cid for cid in selected.ids if cid in lookup))[:limit]
+        sections = {
+            item.id: normalize(item.section)[:80]
+            for item in selected.sections
+            if item.id in ids and normalize(item.section)
+        }
+        sections = {
+            cid: sections.get(cid) or normalize(lookup[cid].get("fact_section") or "")[:80]
+            for cid in ids
+        }
         if cache is not None:
             await cache.save(key, ids, sections=sections)
         return [{**lookup[cid], "fact_section": sections.get(cid)} for cid in ids]
@@ -364,16 +353,11 @@ class HydrationCompiler:
         sections, retained = [], []
         remaining = self.char_budget - len(header) - 1
         # Round-robin by section prevents one large section from exhausting the budget.
-        render_sections = (*SECTIONS, "Registros sin clasificar")
-        queues = {
-            section: [
-                c
-                for c in selected
-                if (c.get("fact_section") or "Registros sin clasificar") == section
-            ]
-            for section in render_sections
-        }
-        lines = {section: [] for section in render_sections}
+        queues = {}
+        for candidate in selected:
+            section = normalize(candidate.get("fact_section") or "")[:80] or "Otros recuerdos"
+            queues.setdefault(section, []).append(candidate)
+        lines = {section: [] for section in queues}
         while any(queues.values()):
             for section, queue in queues.items():
                 if not queue:
@@ -389,7 +373,7 @@ class HydrationCompiler:
                     remaining -= cost
                     lines[section].append(line)
                     retained.append(c)
-        for section in render_sections:
+        for section in queues:
             if lines[section]:
                 sections.append(section + "\n" + "\n".join(lines[section]))
         text = header + "\n" + "\n\n".join(sections) if retained else ""

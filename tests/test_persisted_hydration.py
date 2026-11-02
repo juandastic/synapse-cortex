@@ -117,13 +117,50 @@ async def test_extraction_rejects_unknown_sources_and_nonliteral_quotes():
     assert accepted[0]["attribution"] == "usuario"
 
 
-async def test_unknown_selection_id_retains_known_records_without_publishing_invented_ids(caplog):
+async def test_unknown_selection_ids_do_not_replace_model_selection_with_all_candidates(caplog):
     compiler = HydrationCompiler(
         SimpleNamespace(generate_response=AsyncMock(return_value={"ids": ["not-a-source"]}))
     )
     selected = await compiler.select([claim()])
-    assert [c["id"] for c in selected] == ["claim"]
-    assert "Unverifiable hydration selection" in caplog.text
+    assert selected == []
+    assert "unknown hydration selection IDs" in caplog.text
+
+
+async def test_small_selection_keeps_custom_groups_and_valid_ids_without_filling_with_noise(caplog):
+    compiler = HydrationCompiler(
+        SimpleNamespace(
+            generate_response=AsyncMock(
+                return_value={
+                    "ids": ["fact-1", "invented", "fact-2", "fact-1"],
+                    "sections": [
+                        {"id": "fact-1", "section": "  Mis mascotas\ny sus cuidados  "},
+                        {"id": "fact-2", "section": "Cambio de carrera"},
+                        {"id": "invented", "section": "Inventado"},
+                    ],
+                }
+            )
+        )
+    )
+    candidates = [{**claim(), "id": f"fact-{i}"} for i in range(16)]
+    selected = await compiler.select(candidates)
+    assert [c["id"] for c in selected] == ["fact-1", "fact-2"]
+    assert [c["fact_section"] for c in selected] == [
+        "Mis mascotas y sus cuidados",
+        "Cambio de carrera",
+    ]
+    assert "unknown hydration selection IDs" in caplog.text
+
+
+async def test_selection_reuses_previous_group_when_model_omits_or_blanks_its_title():
+    compiler = HydrationCompiler(
+        SimpleNamespace(
+            generate_response=AsyncMock(
+                return_value={"ids": ["claim"], "sections": [{"id": "claim", "section": "  "}]}
+            )
+        )
+    )
+    selected = await compiler.select([{**claim(), "fact_section": "Mi prima y sus estudios"}])
+    assert selected[0]["fact_section"] == "Mi prima y sus estudios"
 
 
 def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
@@ -195,13 +232,14 @@ async def test_old_compilation_format_enqueues_rebuild_without_parsing_retired_p
     store.stamp.assert_not_awaited()
 
 
-async def test_completed_worker_reuses_unchanged_source_extraction_and_checks_revision():
+@pytest.mark.parametrize("selection_ids", [["claim"], ["invented"]])
+async def test_worker_reuses_extraction_and_publishes_only_valid_selections(selection_ids):
     ep = dict(
         uuid="ep", source="message", valid_at="2026-10-30", content="User: " + claim()["quote"]
     )
     source = sources_from_episodes([ep])[0]
     compiler = HydrationCompiler(
-        SimpleNamespace(generate_response=AsyncMock(return_value={"ids": ["claim"]}))
+        SimpleNamespace(generate_response=AsyncMock(return_value={"ids": selection_ids}))
     )
     store = SimpleNamespace(
         stamp=AsyncMock(return_value="stamp"),
@@ -228,6 +266,11 @@ async def test_completed_worker_reuses_unchanged_source_extraction_and_checks_re
     )
     legacy = SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(0, 0)))
     service = PersistedHydration(store, compiler, legacy)
+    if selection_ids == ["invented"]:
+        with pytest.raises(ValueError, match="No verifiable personal memory selected"):
+            await service.build(dict(user="owner", token="lease", generation=1))
+        store.publish.assert_not_awaited()
+        return
     assert await service.build(dict(user="owner", token="lease", generation=1))
     assert compiler.llm.generate_response.await_count == 1  # Selection only, no extraction.
     store.save_sources.assert_not_awaited()
