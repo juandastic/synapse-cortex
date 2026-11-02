@@ -20,6 +20,7 @@ from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
 from app.services.hydration_compiler import HydrationCompiler, Source
+from app.services.hydration_consolidation import consolidate
 from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
 
@@ -435,6 +436,58 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert props["$ai_total_cost_usd"] == 0.001
         names.add(props["prompt_name"])
     assert names == {"hydration.group"}
+
+
+async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and_tracking(
+    make_client, analytics
+):
+    requests = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        name = payload["response_format"]["json_schema"]["name"]
+        answer = (
+            {
+                "records": [
+                    {
+                        "text": "Leidy quiere estudiar física y química con un pregrado formal.",
+                        "ids": ["F1", "F2"],
+                    }
+                ]
+            }
+            if name == "Proposal"
+            else {
+                "reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]
+            }
+        )
+        return httpx.Response(200, json=completion(answer, model=payload["model"]))
+
+    facts = [
+        dict(
+            id=str(i),
+            fact_id=str(i),
+            quote=f"Leidy quiere estudiar {field} con un pregrado formal.",
+            source_uuid="leidy",
+            date="2026-11-02",
+            fact_section="Estudios",
+        )
+        for i, field in enumerate(["física", "química"])
+    ]
+    with posthog_user_context("owner", "trace", "session"):
+        result = await consolidate(facts, make_client(handler, model=HYDRATION_MODEL))
+    assert len(result) == 1
+    assert len(requests) == 2
+    assert all(
+        r["model"] == HYDRATION_MODEL and r["response_format"]["json_schema"]["strict"]
+        for r in requests
+    )
+    properties = [call.kwargs["properties"] for call in analytics.capture.call_args_list]
+    assert {p["prompt_name"] for p in properties} == {"hydration.consolidate", "hydration.verify"}
+    assert all(
+        p["$ai_trace_id"] == "trace" and p["$ai_session_id"] == "session" for p in properties
+    )
+    assert all(call.kwargs["distinct_id"] == "owner" for call in analytics.capture.call_args_list)
 
 
 async def test_hydration_limits_provider_call_duration(monkeypatch):

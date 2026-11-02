@@ -322,7 +322,7 @@ class HydrationStore:
             try:
                 await self.rows(
                     """MATCH (r:SynapseHydrationSelection {user_id:$user})
-                    WITH r ORDER BY r.created_at DESC SKIP 100 DELETE r""",
+                    WITH r ORDER BY r.created_at DESC SKIP 1000 DELETE r""",
                     user=job["user"],
                 )
             except Exception:
@@ -336,22 +336,22 @@ class HydrationStore:
 
 
 class GroupCache:
-    """Reuse bounded grouping work without storing another copy of personal facts."""
+    """Durably cache grouping and verified consolidation within a two-call slice."""
 
     def __init__(self, store, job):
         self.store, self.job = store, job
         self.calls = 0
 
-    async def load(self, fingerprint):
+    async def load(self, fingerprint, *, calls=1):
         rows = await self.store.rows(
             """MATCH (n:SynapseHydrationSelection {key:$key}) RETURN n.sections AS sections""",
             key=digest([self.job["user"], fingerprint]),
         )
         if rows and rows[0].get("sections") is not None:
             return json.loads(rows[0]["sections"])
-        if self.calls >= 2:
+        if self.calls + calls > 2:
             raise WorkPending()
-        self.calls += 1
+        self.calls += calls
         return None
 
     async def save(self, fingerprint, sections):

@@ -14,6 +14,7 @@ from app.services.hydration_compiler import (
     digest,
     sources_from_episodes,
 )
+from app.services.hydration_consolidation import consolidate
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +85,10 @@ class PersistedHydration:
                 edges,
                 episode_ids={episode["uuid"] for episode in episodes},
             )
-            grouped, seen_hashes = await self._group_incremental(job, candidates)
-        result, retained = await self._render_guarded(user, sources, candidates, grouped, edges)
+            cache = self.store.group_cache(job)
+            grouped, seen_hashes = await self._group_incremental(job, candidates, cache=cache)
+            records = await consolidate(grouped, self.compiler.llm, cache)
+        result, retained = await self._render_guarded(user, sources, candidates, records, edges)
         return await self._publish_if_unchanged(
             job,
             stamp,
@@ -97,7 +100,9 @@ class PersistedHydration:
             {c["id"]: c["fact_section"] for c in grouped if not c.get("classification_fallback")},
         )
 
-    async def _group_incremental(self, job, candidates) -> tuple[list[dict], dict[str, str]]:
+    async def _group_incremental(
+        self, job, candidates, *, cache=None
+    ) -> tuple[list[dict], dict[str, str]]:
         previous = await self.store.current(job["user"]) or {}
         if previous.get("compiler") != COMPILER_VERSION:
             previous = {}
@@ -131,7 +136,7 @@ class PersistedHydration:
         if pending:
             classified = await self.compiler.group(
                 pending,
-                cache=self.store.group_cache(job),
+                cache=cache if cache is not None else self.store.group_cache(job),
                 existing_groups=list(dict.fromkeys(sections.values())),
                 retry_epoch=job["generation"] if previous else None,
             )
