@@ -17,22 +17,11 @@ from app.services.hydration_result import CompilationMetadata, GraphStats, Hydra
 from app.services.hydration_store import HydrationStore
 from app.services.persisted_hydration import PersistedHydration, UnsupportedArchive
 
+FACT = "Mi prima Julia es quien estudia ingeniería en Bogotá."
 
-def claim(quote="Mi prima Julia es quien estudia ingeniería en Bogotá.", **extra):
-    return dict(
-        id="claim",
-        uuid="ep",
-        valid_at="2026-10-30",
-        source="message",
-        source_id="ep:0:0",
-        episode_id="ep",
-        date="2026-10-30",
-        attribution="usuario",
-        quote=quote,
-        section="Personas y vínculos",
-        kind="relato",
-        **extra,
-    )
+
+def episode():
+    return dict(uuid="ep", valid_at="2026-10-30", source="message", name="session")
 
 
 def published(text="Current personal memory"):
@@ -66,7 +55,10 @@ async def test_selection_reuses_previous_group_when_model_omits_or_blanks_its_ti
             )
         )
     )
-    selected = await compiler.group([{**claim(), "fact_section": "Mi prima y sus estudios"}])
+    candidates = compiler.fact_candidates(
+        [episode()], [dict(uuid="claim", fact=FACT, episodes=["ep"])]
+    )
+    selected = await compiler.group([{**candidates[0], "fact_section": "Mi prima y sus estudios"}])
     assert selected[0]["fact_section"] == "Mi prima y sus estudios"
 
 
@@ -88,7 +80,7 @@ def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
             target_uuid="university",
         ),
     ]
-    candidates = compiler.fact_candidates([claim()], edges)
+    candidates = compiler.fact_candidates([episode()], edges)
     result, retained = compiler.render([candidates[0]], edges, GraphStats(2, 2))
     assert "Mi prima Julia" in result.compilation_text
     assert "2026-10-30" in result.compilation_text
@@ -141,9 +133,7 @@ async def test_old_compilation_format_enqueues_rebuild_without_parsing_retired_p
 
 @pytest.mark.parametrize("sections", [[{"id": "claim", "section": "Mi familia"}], []])
 async def test_worker_preserves_full_fact_even_when_grouping_omits_its_id(sections):
-    ep = dict(
-        uuid="ep", source="message", valid_at="2026-10-30", content="User: " + claim()["quote"]
-    )
+    ep = episode()
     compiler = HydrationCompiler(
         SimpleNamespace(
             generate_response=AsyncMock(
@@ -161,7 +151,7 @@ async def test_worker_preserves_full_fact_even_when_grouping_omits_its_id(sectio
                 [
                     dict(
                         uuid="claim",
-                        fact=claim()["quote"],
+                        fact=FACT,
                         episodes=["ep"],
                         source_uuid="cousin",
                         target_uuid="school",
@@ -187,10 +177,15 @@ async def test_worker_preserves_full_fact_even_when_grouping_omits_its_id(sectio
     store.request.assert_not_awaited()
 
 
-async def test_graph_only_archive_keeps_legacy_memory_instead_of_publishing_empty_profile():
+@pytest.mark.parametrize(
+    "episodes, stats", [([], GraphStats(2, 1)), ([episode()], GraphStats(0, 0))]
+)
+async def test_incomplete_archive_keeps_legacy_memory_instead_of_publishing_empty_profile(
+    episodes, stats
+):
     store = SimpleNamespace(
         stamp=AsyncMock(return_value="stamp"),
-        snapshot=AsyncMock(return_value=([], [])),
+        snapshot=AsyncMock(return_value=(episodes, [])),
         publish=AsyncMock(),
         current=AsyncMock(return_value=None),
         group_cache=lambda job: None,
@@ -198,7 +193,7 @@ async def test_graph_only_archive_keeps_legacy_memory_instead_of_publishing_empt
     service = PersistedHydration(
         store,
         HydrationCompiler(None),
-        SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(2, 1))),
+        SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=stats)),
     )
     with pytest.raises(UnsupportedArchive):
         await service.build(dict(user="owner", token="lease", generation=1))

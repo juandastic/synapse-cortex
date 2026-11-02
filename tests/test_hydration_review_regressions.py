@@ -20,20 +20,8 @@ from app.services.notion_correction import CorrectionItem, NotionCorrectionServi
 from app.services.persisted_hydration import PersistedHydration, UnsupportedArchive
 
 
-def evidence(ep="a", text="Tengo diabetes. Mi gato se llama Leo."):
-    return dict(
-        uuid=ep,
-        valid_at="2026-11-01",
-        source="message",
-        id="quote-" + ep,
-        source_id=ep + ":0:0",
-        episode_id=ep,
-        date="2026-11-01",
-        attribution="usuario",
-        quote=text,
-        section="Personas y vínculos",
-        kind="relato",
-    )
+def episode(ep="a"):
+    return dict(uuid=ep, valid_at="2026-11-01", source="message", name="session")
 
 
 def edge(uuid, fact, ep="a", **extra):
@@ -64,12 +52,8 @@ def request(**extra):
 def test_invalidated_fact_never_returns_from_old_quote_even_with_other_active_edges():
     compiler = HydrationCompiler(None)
     quotes = [
-        evidence(),
-        dict(
-            evidence("b", "No recuerdes que tengo diabetes. Era mi prima."),
-            correction=True,
-            attribution="corrección del usuario",
-        ),
+        episode(),
+        {**episode("b"), "source": "text", "name": "user_memory_correction"},
     ]
     facts = [
         edge("retired", "La usuaria tiene diabetes", active=False),
@@ -88,9 +72,7 @@ def test_invalidated_fact_never_returns_from_old_quote_even_with_other_active_ed
 def test_coverage_handles_graph_paraphrases_and_preserves_temporal_fields():
     compiler = HydrationCompiler(None)
     facts = [edge("lives", "The user lives in Bogota", valid_at="2020-01-01T00:00:00Z")]
-    candidates = compiler.fact_candidates(
-        [evidence(text="Vivo en Bogotá desde hace varios años.")], facts
-    )
+    candidates = compiler.fact_candidates([episode()], facts)
     result, _ = compiler.render(candidates, facts, GraphStats(1, 1))
     assert "The user lives in Bogota" in result.compilation_text
     assert "2020-01-01T00:00:00Z" in result.compilation_text
@@ -217,7 +199,7 @@ async def test_rebuild_reuses_classification_or_reselects_remaining_facts(previo
     compiler = HydrationCompiler(
         SimpleNamespace(generate_response=AsyncMock(return_value={"ids": ["cat"]}))
     )
-    candidates = compiler.fact_candidates([evidence()], facts)
+    candidates = compiler.fact_candidates([episode()], facts)
     previous = dict(
         compiler=COMPILER_VERSION,
         seen_hashes={c["id"]: digest(c) for c in candidates},
@@ -285,39 +267,32 @@ async def test_heartbeat_survives_one_transient_database_failure(monkeypatch):
         await asyncio.gather(heartbeat, build, return_exceptions=True)
 
 
-async def test_render_uses_fact_classification_and_never_inherits_unrelated_user_labels():
-    quote = dict(
-        evidence(text="Prefiero respuestas breves."),
-        section="Preferencias de interacción",
-        kind="preferencia",
-    )
+async def test_render_uses_model_topic_and_neutral_provenance():
+    context = episode()
     compiler = HydrationCompiler(
         SimpleNamespace(
             generate_response=AsyncMock(
                 return_value={
-                    "ids": ["medication"],
                     "groups": [{"title": "Situación reciente", "ids": ["medication"]}],
                 }
             )
         )
     )
     facts = [edge("medication", "La prima toma el medicamento X")]
-    selected = await compiler.group(compiler.fact_candidates([quote], facts))
+    selected = await compiler.group(compiler.fact_candidates([context], facts))
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Situación reciente" in result.compilation_text
-    assert "Preferencias de interacción" not in result.compilation_text
     assert "; usuario;" not in result.compilation_text
     assert "; preferencia;" not in result.compilation_text
     assert "conversación/documento" in result.compilation_text
-    # No classifier result is safer than borrowing the episode's label.
+    # Missing classifications keep a neutral fallback topic.
     selected[0].pop("fact_section")
     unclassified, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Otros recuerdos" in unclassified.compilation_text
     compiler.llm.generate_response.return_value = {
-        "ids": ["medication"],
         "groups": [{"title": "Acompañamiento a mi prima", "ids": ["medication"]}],
     }
-    selected = await compiler.group(compiler.fact_candidates([quote], facts))
+    selected = await compiler.group(compiler.fact_candidates([context], facts))
     grouped, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Acompañamiento a mi prima" in grouped.compilation_text
     assert "Otros recuerdos" not in grouped.compilation_text
@@ -327,13 +302,9 @@ async def test_render_uses_fact_classification_and_never_inherits_unrelated_user
 @pytest.mark.parametrize("name", ["user_memory_correction", "notion_correction"])
 def test_mandatory_correction_keeps_an_explicit_group_when_model_did_not_select_it(name):
     compiler = HydrationCompiler(None)
-    quote = {
-        **evidence(text="Julia es mi prima."),
-        "source": "text",
-        "name": name,
-    }
+    context = {**episode(), "source": "text", "name": name}
     facts = [edge("cousin", "Julia es mi prima.")]
-    candidates = compiler.fact_candidates([quote], facts)
+    candidates = compiler.fact_candidates([context], facts)
     result, retained = compiler.render(candidates, facts, GraphStats(2, 1))
     assert "Correcciones del usuario" in result.compilation_text
     assert retained[0]["fact_section"] == "Correcciones del usuario"

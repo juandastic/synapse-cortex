@@ -82,7 +82,7 @@ class PersistedHydration:
             records = await consolidate(
                 grouped, self.compiler.llm, cache, retry_epoch=job["generation"]
             )
-        result, _ = await self._render_guarded(user, candidates, records, edges)
+        result, _ = await self._render_guarded(user, episodes, candidates, records, edges)
         return await self._publish_if_unchanged(
             job,
             stamp,
@@ -133,11 +133,11 @@ class PersistedHydration:
             grouped.update({c["id"]: c for c in classified})
         return [grouped[c["id"]] for c in candidates], seen_hashes
 
-    async def _render_guarded(self, user, candidates, grouped, edges):
+    async def _render_guarded(self, user, episodes, candidates, grouped, edges):
         if candidates and not grouped:
             raise ValueError("Grouping omitted every available fact; preserving legacy hydration")
         stats = await self.hydration_service.fetch_graph_stats(user)
-        if not grouped and (stats.entity_count or stats.relationship_count):
+        if not grouped and (episodes or stats.entity_count or stats.relationship_count):
             raise UnsupportedArchive("No active graph facts; preserving classic hydration")
         result, retained = self.compiler.render(grouped, edges, stats)
         if grouped and not result.compilation_text:
