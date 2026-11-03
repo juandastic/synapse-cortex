@@ -9,7 +9,7 @@ from app.services.hydration_compiler import (
     HydrationCompiler,
     fact_hash,
 )
-from app.services.hydration_consolidation import apply_plan, organize
+from app.services.hydration_consolidation import apply_plan, organize, prioritize
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,15 @@ class PersistedHydration:
         if not candidates and (head or stats.entity_count or stats.relationship_count):
             raise UnsupportedArchive("No active graph facts; preserving classic hydration")
         with posthog_user_context(user):
-            plan = await organize(candidates, self.compiler.llm)
-        records = apply_plan(candidates, plan)
+            priorities, proposals = await prioritize(candidates, self.compiler.llm)
+            # Group only facts that fit; final headings may trim whole low-priority facts again.
+            _, retained = self.compiler.render(
+                apply_plan(candidates, {"priority_ids": priorities}), edges, stats
+            )
+            plan = await organize(retained, self.compiler.llm, proposals)
+        plan["priority_ids"] = priorities
+        retained_ids = {f["id"] for f in retained}
+        records = [r for r in apply_plan(candidates, plan) if r["id"] in retained_ids]
         result, _ = self.compiler.render(records, edges, stats)
         if candidates and not result.compilation_text:
             raise ValueError("Compilation budget omitted every available fact")

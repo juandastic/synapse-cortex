@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 
-LLM_TIMEOUT_SECONDS = 90
+LLM_TIMEOUT_SECONDS = 120
 
 
 def source_facts(record: dict) -> list[dict]:

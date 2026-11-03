@@ -20,9 +20,16 @@ from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import ContextualGeminiModels, get_llm_context, posthog_user_context
 from app.services.hydration_compiler import HydrationCompiler
-from app.services.hydration_consolidation import apply_plan, organize
+from app.services.hydration_consolidation import apply_plan, prioritize
+from app.services.hydration_consolidation import organize as group_facts
 from app.services.hydration_result import GraphStats
 from app.services.ingestion import EpisodeSummary, IngestionService
+
+
+async def organize(facts, llm):
+    priorities, proposals = await prioritize(facts, llm)
+    plan = await group_facts(facts, llm, proposals)
+    return {**plan, "priority_ids": priorities}
 
 
 def completion(content, *, model="openai/test-model", usage=None, finish_reason="stop"):
@@ -53,7 +60,7 @@ def analytics(monkeypatch):
 async def make_client():
     clients = []
 
-    def make(handler, model="openai/main"):
+    def make(handler, model="openai/main", reasoning_effort="low"):
         sdk = openai.AsyncOpenAI(
             api_key="test-only",
             base_url="https://openrouter.ai/api/v1",
@@ -61,7 +68,9 @@ async def make_client():
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         client = OpenRouterGraphitiClient(
-            LLMConfig(model=model, small_model="openai/small"), client=sdk
+            LLMConfig(model=model, small_model="openai/small"),
+            client=sdk,
+            reasoning_effort=reasoning_effort,
         )
         clients.append(client)
         return client
@@ -375,7 +384,10 @@ async def test_factory_preserves_embeddings_and_vertex_rollback(monkeypatch):
         await graph.llm_client.close()
 
 
-async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make_client, analytics):
+@pytest.mark.parametrize("reasoning_effort", ["low", "medium"])
+async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(
+    make_client, analytics, reasoning_effort
+):
     requests = []
     episode = dict(uuid="ep", valid_at="2026-11-01")
 
@@ -383,8 +395,12 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         payload = json.loads(request.content)
         requests.append(payload)
         schema = payload["response_format"]["json_schema"]
-        assert schema["name"] == "Organization"
-        answer = {"groups": [{"title": "Personas y vínculos", "ids": ["F1"]}]}
+        assert schema["name"] in {"Priorities", "Topics"}
+        answer = (
+            {"priority_ids": ["F1"], "records": []}
+            if schema["name"] == "Priorities"
+            else {"groups": [{"title": "Personas y vínculos", "ids": ["F1"]}], "reviews": []}
+        )
         return httpx.Response(
             200,
             json=completion(
@@ -399,7 +415,9 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
             ),
         )
 
-    hydration_client = make_client(handler, model=HYDRATION_MODEL)
+    hydration_client = make_client(
+        handler, model=HYDRATION_MODEL, reasoning_effort=reasoning_effort
+    )
     compiler = HydrationCompiler(hydration_client)
     facts = [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
@@ -418,7 +436,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
     result, _ = compiler.render(selected, facts, GraphStats(2, 1))
     assert "Martina es mi sobrina" in result.compilation_text
     assert result.metadata.included_edge_ids == ["fact"]
-    assert len(requests) == 1
+    assert len(requests) == 2
 
     def assert_strict_objects(schema):
         if isinstance(schema, dict):
@@ -433,10 +451,10 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
     for request in requests:
         assert request["model"] == HYDRATION_MODEL
         assert 0 < request["max_completion_tokens"] <= 16384
-        assert request["reasoning"]["effort"] == "low"
+        assert request["reasoning"]["effort"] == reasoning_effort
         assert request["response_format"]["json_schema"]["strict"] is True
         assert_strict_objects(request["response_format"]["json_schema"]["schema"])
-    assert analytics.capture.call_count == 1
+    assert analytics.capture.call_count == 2
     names = set()
     for call in analytics.capture.call_args_list:
         assert call.kwargs["distinct_id"] == "owner"
@@ -446,7 +464,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
         assert props["$ai_provider"] == "openrouter"
         assert props["$ai_total_cost_usd"] == 0.001
         names.add(props["prompt_name"])
-    assert names == {"hydration.organize"}
+    assert names == {"hydration.prioritize", "hydration.organize"}
 
 
 async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and_tracking(
@@ -467,9 +485,10 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
                     }
                 ]
             }
-            if name == "Organization"
+            if name == "Priorities"
             else {
-                "reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]
+                "groups": [{"title": "Estudios", "ids": ["F1", "F2"]}],
+                "reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}],
             }
         )
         return httpx.Response(200, json=completion(answer, model=payload["model"]))
@@ -495,7 +514,7 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
         for r in requests
     )
     properties = [call.kwargs["properties"] for call in analytics.capture.call_args_list]
-    assert {p["prompt_name"] for p in properties} == {"hydration.organize", "hydration.verify"}
+    assert {p["prompt_name"] for p in properties} == {"hydration.prioritize", "hydration.organize"}
     assert all(
         p["$ai_trace_id"] == "trace" and p["$ai_session_id"] == "session" for p in properties
     )

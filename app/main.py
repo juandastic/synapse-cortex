@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
             small_model=HYDRATION_MODEL,
             max_tokens=16384,
         ),
-        reasoning_effort="low",
+        reasoning_effort="medium",
     )
     persisted = PersistedHydration(
         HydrationStore(neo4j_driver),

@@ -43,7 +43,7 @@ async def test_every_build_runs_model_without_reading_previous_core():
     job = dict(user="owner", token="lease", generation=1)
     for _ in range(3):
         assert await service.build(job)
-    assert llm.generate_response.await_count == 3
+    assert llm.generate_response.await_count == 6
     store.current.assert_not_awaited()
 
 
@@ -65,7 +65,7 @@ async def test_rebuild_uses_latest_selected_graph_facts_and_provenance():
         stats,
     )
     assert await service.build(job)
-    assert llm.generate_response.await_count == 2
+    assert llm.generate_response.await_count == 4
     result = store.publish.await_args.args[1]
     assert "Julia estudia medicina." in result.compilation_text
     assert "2026-11-03" in result.compilation_text
@@ -88,7 +88,7 @@ async def test_provider_failure_preserves_details_and_retry_occurs_only_on_next_
     llm.generate_response.side_effect = RuntimeError("offline")
     assert await service.build(dict(user="owner", token="lease", generation=1))
     assert "Julia es mi prima" in store.publish.await_args.args[1].compilation_text
-    assert llm.generate_response.await_count == 1
+    assert llm.generate_response.await_count == 2
 
 
 @pytest.mark.parametrize("head,stats", [("ep", GraphStats(0, 0)), (None, GraphStats(2, 0))])
@@ -194,6 +194,10 @@ async def test_large_graph_needs_at_most_two_model_calls_after_input_caps():
     assert llm.generate_response.await_count == 2
     sent = json.loads(llm.generate_response.await_args_list[0].args[0][-1].content)["facts"]
     assert len(sent) <= 800 and sum((len(f["text"]) for f in sent)) <= 120000
+    grouped = json.loads(llm.generate_response.await_args_list[1].args[0][-1].content)["facts"]
+    assert len(grouped) < len(sent)
+    assert {f["text"] for f in grouped} < {f["text"] for f in sent}
+    assert all(set(f) == {"id", "text"} for f in grouped)
     assert len(store.publish.await_args.args[1].metadata.included_edge_ids) <= 800
 
 
@@ -208,7 +212,8 @@ async def test_core_can_be_deleted_and_regenerated_without_carrying_previous_dec
     store.current.return_value = None
     assert await service.build(job)
     regenerated = store.publish.await_args.args[1]
-    assert llm.generate_response.await_count == 2
+    assert llm.generate_response.await_count == 4
     assert first.metadata.included_edge_ids == regenerated.metadata.included_edge_ids
     inputs = [json.loads(c.args[0][-1].content) for c in llm.generate_response.await_args_list]
-    assert inputs[0] == inputs[1] and set(inputs[0]) == {"facts"}
+    assert inputs[0] == inputs[2] and set(inputs[0]) == {"facts"}
+    assert inputs[1] == inputs[3] and set(inputs[1]) == {"facts"}
