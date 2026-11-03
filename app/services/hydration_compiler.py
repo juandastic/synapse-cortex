@@ -14,7 +14,7 @@ from app.services.hydration_result import (
 )
 from app.services.hydration_selection import INPUT_CHARS, MAX_FACTS
 
-COMPILER_VERSION = "prioritized-core-3"
+COMPILER_VERSION = "prioritized-core-4"
 CHAR_BUDGET = 120_000
 logger = logging.getLogger(__name__)
 
