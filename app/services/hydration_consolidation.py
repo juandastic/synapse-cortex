@@ -28,7 +28,7 @@ El código elegirá hechos completos según este orden hasta llenar el presupues
 Opcionalmente propone hasta 20 records {text, ids}, de 2 a 8 IDs cada uno, SOLO para
 consolidar redundancias conservando TODOS sus detalles y matices. No hay objetivo de compresión.
 No reescribas hechos aislados. Cada propuesta debe estar respaldada por sus propios IDs.
-Solo combina hechos del mismo sujeto, tema y ámbito temporal, con fechas y corrección iguales.
+Solo combina hechos del mismo sujeto, tema y ámbito temporal, con fechas iguales.
 Preserva nombres, terceros, cantidades, negaciones, incertidumbre, planes frente a decisiones,
 atribución y diferencias temporales. No reconcilies contradicciones ni infieras simultaneidad.
 Los hechos no fusionados conservarán su texto literal. Ante duda deja records vacío.
@@ -103,7 +103,7 @@ async def _generate(llm, prompt, data, schema, name, max_tokens):
 
 
 def same_scope(facts):
-    fields = ("source_uuid", "date", "date_kind", "valid_at", "invalid_at", "correction")
+    fields = ("source_uuid", "date", "date_kind", "valid_at", "invalid_at")
     return (
         bool(facts[0].get("source_uuid"))
         and len({tuple(f.get(k) for k in fields) for f in facts}) == 1
@@ -127,7 +127,6 @@ async def prioritize(facts, llm):
                         "subject": f.get("source_uuid"),
                         "valid_at": f.get("valid_at"),
                         "invalid_at": f.get("invalid_at"),
-                        "correction": f.get("correction", False),
                     }
                     for key, f in aliases.items()
                 ]
@@ -250,13 +249,7 @@ def apply_plan(facts, plan):
             **f,
             "semantic_rank": ranks.get(f["id"], (index + 0.5) * fallback_scale),
             "fact_section": plan.get("sections", {}).get(f["id"])
-            or (
-                "Correcciones del usuario"
-                if f.get("correction")
-                else "Recuerdos recientes"
-                if f.get("priority", 2) < 2
-                else "Recuerdos relevantes"
-            ),
+            or ("Recuerdos recientes" if f.get("priority", 2) < 2 else "Recuerdos relevantes"),
         }
         for index, f in enumerate(ordered)
     ]

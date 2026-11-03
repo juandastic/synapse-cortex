@@ -14,7 +14,7 @@ from app.services.hydration_result import (
 )
 from app.services.hydration_selection import INPUT_CHARS, MAX_FACTS
 
-COMPILER_VERSION = "prioritized-core-4"
+COMPILER_VERSION = "prioritized-core-5"
 CHAR_BUDGET = 120_000
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,6 @@ def priority_order(records):
     ordered.sort(key=lambda c: c.get("date") if c.get("date") != "unknown" else "", reverse=True)
     ordered.sort(
         key=lambda c: (
-            not bool(c.get("correction")),
             c.get("semantic_rank", float("inf")),
             c.get("priority", 2),
             c.get("selection_rank", 0),
@@ -78,7 +77,6 @@ class HydrationCompiler:
                 candidate["episode_ids"] = sorted(
                     set(candidate["episode_ids"] + edge.get("episode_ids", []))
                 )
-                candidate["correction"] |= bool(edge.get("correction"))
                 candidate["priority"] = min(candidate["priority"], edge.get("priority", 2))
                 candidate["selection_rank"] = min(
                     candidate["selection_rank"], edge.get("selection_rank", 0)
@@ -96,7 +94,6 @@ class HydrationCompiler:
                 target_uuid=edge.get("target_uuid"),
                 date=edge.get("date") or "unknown",
                 date_kind=edge.get("date_kind", "registro"),
-                correction=bool(edge.get("correction")),
                 priority=edge.get("priority", 2),
                 selection_rank=edge.get("selection_rank", 0),
                 episode_ids=edge.get("episode_ids", []),
@@ -154,9 +151,7 @@ class HydrationCompiler:
         pending = deque(ordered)
         while pending:
             candidate = pending.popleft()
-            section = normalize(candidate.get("fact_section") or "")[:80] or (
-                "Correcciones del usuario" if candidate.get("correction") else "Otros recuerdos"
-            )
+            section = normalize(candidate.get("fact_section") or "")[:80] or "Otros recuerdos"
             c = {**candidate, "fact_section": section}
             line = f"- [{c.get('date_kind', 'episodio')} {c['date']}; conversación/documento] {normalize(c['quote'])}"
             if c.get("valid_at"):

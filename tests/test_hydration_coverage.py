@@ -8,7 +8,6 @@ from app.services.hydration_compiler import COMPILER_VERSION, HydrationCompiler,
 from app.services.hydration_consolidation import apply_plan
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.hydration_selection import (
-    CORRECTION_FACTS,
     DIVERSITY_QUERY,
     HEAD_QUERY,
     HUB_QUERY,
@@ -34,7 +33,6 @@ def edge(cid, **extra):
         "date": "2026-11-02",
         "date_kind": "episodio",
         "priority": 1,
-        "correction": False,
         "episode_ids": ["ep"],
         **extra,
     }
@@ -42,7 +40,7 @@ def edge(cid, **extra):
 
 def test_large_input_is_capped_before_model_and_keeps_whole_priority_facts():
     edges = [edge(f"f{i:04}", fact=f"Dato {i} " + "x" * 400, priority=2) for i in range(5000)]
-    edges += [edge("correction", correction=True, fact="Julia es mi prima, no mi hija.")]
+    edges += [edge("recent", priority=1, fact="Julia es mi prima, no mi hija.")]
     compiler = HydrationCompiler(None)
     candidates = compiler.fact_candidates(edges)
     assert len(candidates) <= MAX_FACTS
@@ -53,7 +51,7 @@ def test_large_input_is_capped_before_model_and_keeps_whole_priority_facts():
     rendered, _ = compiler.render(apply_plan(candidates, {}), edges, GraphStats(1000, 5000))
     assert len(rendered.compilation_text) <= compiler.char_budget
     assert set(rendered.metadata.included_edge_ids) <= {c["id"] for c in candidates}
-    assert "correction" in rendered.metadata.included_edge_ids
+    assert "recent" in rendered.metadata.included_edge_ids
     assert "f4999" not in rendered.metadata.included_edge_ids
 
 
@@ -79,18 +77,37 @@ def test_exact_duplicates_have_stable_primary_and_cover_only_matching_subject_an
     assert len(first) == 3
 
 
-def test_programmatic_budget_prioritizes_corrections_globally_and_uses_whole_lines():
+def test_programmatic_budget_applies_global_priority_before_groups_and_uses_whole_lines():
     compiler = HydrationCompiler(None, char_budget=1200)
     rows = [edge(f"old{i}", priority=2, date="2015-01-01") for i in range(30)]
-    rows += [edge("correction", correction=True, fact="Mi prima Julia estudia ingeniería.")]
+    rows += [edge("recent", fact="Mi prima Julia estudia ingeniería.")]
     candidates = compiler.fact_candidates(rows)
     plan = {"sections": {c["id"]: f"Tema {i}" for i, c in enumerate(candidates)}}
     result, _ = compiler.render(apply_plan(candidates, plan), rows, GraphStats(100, 100))
-    assert result.metadata.included_edge_ids[0] == "correction"
+    assert result.metadata.included_edge_ids[0] == "recent"
     assert len(result.compilation_text) <= 1200
     assert "Mi prima Julia estudia ingeniería." in result.compilation_text
     assert len(result.metadata.included_edge_ids) < len(rows)
     assert result.metadata.included_node_ids == []
+
+
+def test_seed_facts_are_retained_without_correction_priority_or_fallback_heading():
+    compiler = HydrationCompiler(None)
+    rows = [
+        edge("seed", correction=True, priority=3, date="2026-02-07"),
+        edge("recent", date="2026-11-03"),
+    ]
+    candidates = compiler.fact_candidates(rows)
+    assert [c["id"] for c in candidates] == ["recent", "seed"]
+    assert all("correction" not in c for c in candidates)
+    # Even a provider ranking the seed last must take precedence over its old flag.
+    result, _ = compiler.render(
+        apply_plan(candidates, {"priority_ids": ["recent", "seed"]}), rows, GraphStats(3, 2)
+    )
+    assert result.metadata.included_edge_ids == ["recent", "seed"]
+    assert "Correcciones del usuario" not in result.compilation_text
+    assert "Recuerdos relevantes" in result.compilation_text
+    assert rows[0]["fact"] in result.compilation_text
 
 
 async def test_selection_uses_bounded_queries_isolates_user_and_fills_legacy_gaps():
@@ -102,18 +119,17 @@ async def test_selection_uses_bounded_queries_isolates_user_and_fills_legacy_gap
         if query == HEAD_QUERY:
             return [{"uuid": "ep"}]
         if query == RECENT_QUERY:
-            return (
-                [edge("correction", correction=True)] if params["corrections"] else [edge("recent")]
-            )
+            assert set(params) == {"user", "episode_limit", "fact_limit"}
+            return [edge("recent", episode_ids=["seed-episode"])]
         if query == LEGACY_QUERY:
-            assert set(params["excluded"]) == {"correction", "recent"}
+            assert set(params["excluded"]) == {"recent"}
             assert params["limit"] == RECENT_FACTS - 1
             return [edge("legacy", episode_ids=[])]
         if query == HUB_QUERY:
             assert params["hub_candidates"] == 30 and params["per_hub"] == 8
             return [{"facts": [edge("hub", episode_ids=[]), edge("recent")]}]
         if query == DIVERSITY_QUERY:
-            assert params["hubs"] == 2 and params["per_hub"] == 235
+            assert params["hubs"] == 2 and params["per_hub"] == 265
             return [{"facts": [edge("diverse", episode_ids=[])]}]
         assert query == STATS_QUERY
         return [{"entities": 1000, "relationships": 5000}]
@@ -121,14 +137,16 @@ async def test_selection_uses_bounded_queries_isolates_user_and_fills_legacy_gap
     store = HydrationStore(None)
     store.rows = rows
     selected, head, stats = await store.select("owner")
-    assert {e["uuid"] for e in selected} == {"correction", "recent", "legacy", "hub", "diverse"}
+    assert {e["uuid"] for e in selected} == {"recent", "legacy", "hub", "diverse"}
+    assert next(e for e in selected if e["uuid"] == "recent")["episode_ids"] == ["seed-episode"]
     assert head == "ep" and stats.relationship_count == 5000
     assert next((e for e in selected if e["uuid"] == "hub"))["priority"] == 2
-    assert len(calls) == 7
+    assert len(calls) == 6
     for query, _params in calls:
         assert ".content" not in query and ".summary" not in query
         if query not in (STATS_QUERY,):
             assert "LIMIT" in query
+        assert "correction" not in query and "$names" not in query
     assert "r.expired_at IS NULL" in RECENT_QUERY
     assert "r.invalid_at IS NULL" in RECENT_QUERY
     assert "r:RELATES_TO {uuid:id}" in RECENT_QUERY
@@ -140,7 +158,6 @@ async def test_full_recent_quota_skips_legacy_fill():
     store.head = AsyncMock(return_value="ep")
     store.rows = AsyncMock(
         side_effect=[
-            [],
             [edge(str(i)) for i in range(RECENT_FACTS)],
             [],
             [],
@@ -149,7 +166,7 @@ async def test_full_recent_quota_skips_legacy_fill():
     )
     await store.select("owner")
     assert all((call.args[0] != LEGACY_QUERY for call in store.rows.await_args_list))
-    assert store.rows.await_args_list[0].kwargs["fact_limit"] == CORRECTION_FACTS
+    assert store.rows.await_args_list[0].kwargs["fact_limit"] == RECENT_FACTS
 
 
 @pytest.mark.parametrize("change", ["deleted_alias", "changed_subject", "changed_detail"])
@@ -220,7 +237,7 @@ def test_retired_facts_stay_out_and_fact_text_does_not_trigger_business_exclusio
     rows = [
         edge("retired", active=False, fact="La usuaria toma X."),
         edge("expired", expired_at="2026-01-01", fact="Dato vencido."),
-        edge("correction", correction=True, fact="Es mi prima quien toma X."),
+        edge("correction", fact="Es mi prima quien toma X."),
         edge("literal", fact="No guardes rencor, decía mi abuela."),
     ]
     compiler = HydrationCompiler(None)
@@ -258,22 +275,18 @@ async def test_select_to_candidates_preserves_old_diverse_fact_under_text_budget
         if query == HEAD_QUERY:
             return [{"uuid": "ep"}]
         if query == RECENT_QUERY:
-            return (
-                [long(f"correction{i}", correction=True) for i in range(60)]
-                if params["corrections"]
-                else [long(f"recent{i}") for i in range(150)]
-            )
+            return [long(f"recent{i}") for i in range(150)]
         if query == HUB_QUERY:
             return [
                 {"facts": [long(f"hub{h}-{i}", episode_ids=[]) for i in range(8)]}
                 for h in range(15)
             ]
         if query == DIVERSITY_QUERY:
-            assert params["per_hub"] == FACTS_PER_DIVERSE_HUB == 235
+            assert params["per_hub"] == FACTS_PER_DIVERSE_HUB == 265
             first = [long("rare", date="2019-01-01", episode_ids=[])] + [
-                long(f"diverse0-{i}", episode_ids=[]) for i in range(234)
+                long(f"diverse0-{i}", episode_ids=[]) for i in range(264)
             ]
-            second = [long(f"diverse1-{i}", episode_ids=[]) for i in range(235)]
+            second = [long(f"diverse1-{i}", episode_ids=[]) for i in range(265)]
             return [{"facts": first}, {"facts": second}]
         assert query == STATS_QUERY
         return [{"entities": 1000, "relationships": 5000}]
