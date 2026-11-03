@@ -403,7 +403,7 @@ async def test_hydration_uses_fixed_model_with_existing_openrouter_tracking(make
     compiler = HydrationCompiler(hydration_client)
     facts = [dict(uuid="fact", fact="Martina es mi sobrina.", episodes=["ep"])]
     with posthog_user_context("owner", "hydration-trace", "session"):
-        plan, _ = await organize(
+        plan = await organize(
             compiler.fact_candidates(
                 [{**f, "date": episode["valid_at"], "episode_ids": ["ep"]} for f in facts]
             ),
@@ -486,7 +486,7 @@ async def test_consolidation_and_verification_keep_fixed_model_strict_schema_and
         for i, field in enumerate(["física", "química"])
     ]
     with posthog_user_context("owner", "trace", "session"):
-        plan, _ = await organize(facts, make_client(handler, model=HYDRATION_MODEL))
+        plan = await organize(facts, make_client(handler, model=HYDRATION_MODEL))
         result = apply_plan(facts, plan)
     assert len(result) == 1
     assert len(requests) == 2
@@ -509,7 +509,7 @@ async def test_hydration_limits_provider_call_duration(monkeypatch):
         await asyncio.Event().wait()
 
     compiler = HydrationCompiler(SimpleNamespace(generate_response=stalled))
-    plan, reusable = await organize(
+    plan = await organize(
         compiler.fact_candidates([dict(uuid="fact", fact="Martina es mi sobrina.")]), compiler.llm
     )
-    assert not reusable and not plan["records"]
+    assert not plan["records"]

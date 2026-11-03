@@ -99,11 +99,11 @@ def same_scope(facts):
 
 
 async def organize(facts, llm):
-    """Return a UUID-based plan; failures preserve literals until the next graph change."""
+    """Return UUID-based priorities and groups; failures preserve literal facts."""
     aliases = {f"F{i}": f for i, f in enumerate(sorted(facts, key=lambda f: f["id"]), 1)}
     empty = {"sections": {}, "records": [], "priority_ids": []}
     if not facts:
-        return empty, True
+        return empty
     try:
         response = await _generate(
             llm,
@@ -129,7 +129,7 @@ async def organize(facts, llm):
         logger.warning(
             "Hydration organization unavailable; preserving literal facts", exc_info=True
         )
-        return empty, False
+        return empty
     sections = {}
     for group in response.groups:
         title = " ".join(group.title.split())[:80]
@@ -163,7 +163,7 @@ async def organize(facts, llm):
         )
     plan = {"sections": sections, "records": [], "priority_ids": priority_ids}
     if not candidates:
-        return plan, True
+        return plan
     try:
         verification = await _generate(
             llm,
@@ -188,7 +188,7 @@ async def organize(facts, llm):
         logger.warning(
             "Hydration verification unavailable; preserving literal facts", exc_info=True
         )
-        return plan, False
+        return plan
     reviews = defaultdict(list)
     for review in verification.reviews:
         reviews[review.record_index].append(review)
@@ -197,11 +197,11 @@ async def organize(facts, llm):
         for i, record in enumerate(candidates)
         if len(reviews[i]) == 1 and reviews[i][0].complete and reviews[i][0].supported
     ]
-    return plan, True
+    return plan
 
 
 def apply_plan(facts, plan):
-    """Reapply cached decisions to current provenance, never cached source copies."""
+    """Apply this build's model priorities and verified merges to selected graph facts."""
     ordered = priority_order(facts)
     known = {f["id"] for f in facts}
     ranks = {

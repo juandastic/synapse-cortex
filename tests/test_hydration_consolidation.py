@@ -60,8 +60,8 @@ def provider(records=None, reviews=None):
 async def test_one_organization_and_one_review_cover_all_originals_with_dates():
     llm = provider()
     source = facts()
-    plan, reusable = await organize(source, llm)
-    assert reusable and llm.generate_response.await_count == 2
+    plan = await organize(source, llm)
+    assert llm.generate_response.await_count == 2
     assert plan["records"][0]["ids"] == ["0", "1"]
     records = apply_plan(source, plan)
     edges = [
@@ -90,8 +90,8 @@ async def test_one_organization_and_one_review_cover_all_originals_with_dates():
 async def test_invalid_proposal_ids_do_not_suppress_any_literal_or_trigger_review(ids):
     llm = provider(records=[{"text": "rewrite", "ids": ids}])
     source = facts()
-    plan, ok = await organize(source, llm)
-    assert ok and llm.generate_response.await_count == 1
+    plan = await organize(source, llm)
+    assert llm.generate_response.await_count == 1
     assert [f["quote"] for f in apply_plan(source, plan)] == [f["quote"] for f in source]
 
 
@@ -109,8 +109,8 @@ async def test_different_subjects_and_temporal_scopes_stay_separate(difference):
     source = facts()
     source[1].update(difference)
     llm = provider()
-    plan, ok = await organize(source, llm)
-    assert ok and (not plan["records"]) and (llm.generate_response.await_count == 1)
+    plan = await organize(source, llm)
+    assert (not plan["records"]) and (llm.generate_response.await_count == 1)
     assert len(apply_plan(source, plan)) == 2
 
 
@@ -125,20 +125,20 @@ async def test_different_subjects_and_temporal_scopes_stay_separate(difference):
 )
 async def test_absent_rejected_or_duplicate_verdict_keeps_originals(reviews):
     source = facts()
-    plan, ok = await organize(source, provider(reviews=reviews))
-    assert ok and len(apply_plan(source, plan)) == 2
+    plan = await organize(source, provider(reviews=reviews))
+    assert len(apply_plan(source, plan)) == 2
     assert not plan["records"]
 
 
 @pytest.mark.parametrize("failed_call", [1, 2])
-async def test_provider_failure_publishes_literals_without_reusable_fingerprint(failed_call):
+async def test_provider_failure_publishes_literals_with_literal_facts(failed_call):
     llm = provider()
     responses = list(llm.generate_response.side_effect)
     responses[failed_call - 1] = RuntimeError("provider unavailable")
     llm.generate_response.side_effect = responses
     source = facts()
-    plan, reusable = await organize(source, llm)
-    assert not reusable and llm.generate_response.await_count == failed_call
+    plan = await organize(source, llm)
+    assert llm.generate_response.await_count == failed_call
     assert [f["quote"] for f in apply_plan(source, plan)] == [f["quote"] for f in source]
 
 
@@ -146,8 +146,8 @@ async def test_no_proposals_or_missing_topics_keeps_every_fact_without_extra_cal
     source = facts()
     llm = provider(records=[])
     llm.generate_response.side_effect = [{"groups": [], "records": []}]
-    plan, ok = await organize(source, llm)
-    assert ok and len(apply_plan(source, plan)) == 2
+    plan = await organize(source, llm)
+    assert len(apply_plan(source, plan)) == 2
     assert llm.generate_response.await_count == 1
     assert all(
         (
@@ -161,23 +161,20 @@ async def test_model_can_paraphrase_without_linguistic_word_rules():
     llm = provider(
         records=[{"text": "Su rutina matutina incluye tomar café o té.", "ids": ["F1", "F2"]}]
     )
-    plan, ok = await organize(facts(), llm)
-    assert (
-        ok
-        and apply_plan(facts(), plan)[0]["quote"] == "Su rutina matutina incluye tomar café o té."
-    )
+    plan = await organize(facts(), llm)
+    assert apply_plan(facts(), plan)[0]["quote"] == "Su rutina matutina incluye tomar café o té."
 
 
 async def test_partial_proposal_preserves_every_unmerged_fact():
     source = facts() + [{**facts()[0], "id": "2", "fact_id": "2", "quote": "Tiene un gato."}]
-    plan, _ = await organize(source, provider())
+    plan = await organize(source, provider())
     records = apply_plan(source, plan)
     assert len(records) == 2 and records[-1]["quote"] == "Tiene un gato."
 
 
 async def test_changed_source_is_not_hidden_inside_verified_paraphrase():
     source = facts()
-    plan, _ = await organize(source, provider())
+    plan = await organize(source, provider())
     records = apply_plan(source, plan)
     rows = [
         dict(uuid=f["id"], fact=f["quote"], valid_at=f["valid_at"], invalid_at=None) for f in source
@@ -191,7 +188,7 @@ async def test_changed_source_is_not_hidden_inside_verified_paraphrase():
 async def test_merged_record_over_budget_falls_back_to_whole_sources():
     source = facts()
     llm = provider(records=[{"text": "x" * 3000, "ids": ["F1", "F2"]}])
-    plan, _ = await organize(source, llm)
+    plan = await organize(source, llm)
     rows = [
         dict(uuid=f["id"], fact=f["quote"], valid_at=f["valid_at"], invalid_at=None) for f in source
     ]
@@ -238,7 +235,7 @@ async def test_semantic_priority_places_older_personal_detail_before_connected_r
             }
         )
     )
-    plan, _ = await organize(source, llm)
+    plan = await organize(source, llm)
     result, _ = compiler.render(apply_plan(source, plan), rows, GraphStats(12, 11))
     assert result.metadata.included_edge_ids[0] == "personal"
     assert "Necesita apoyo para organizar las comidas." in result.compilation_text
@@ -257,7 +254,7 @@ async def test_unknown_duplicate_and_missing_priority_ids_do_not_remove_literal_
             }
         )
     )
-    plan, _ = await organize(source, llm)
+    plan = await organize(source, llm)
     assert plan["priority_ids"] == ["1"]
     records = apply_plan(source, plan)
     assert {r["id"] for r in records} == {"0", "1"}

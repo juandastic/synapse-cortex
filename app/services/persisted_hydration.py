@@ -6,7 +6,6 @@ import time
 
 from app.core.posthog import posthog_user_context
 from app.services.hydration_compiler import (
-    COMPILER_VERSION,
     HydrationCompiler,
     fact_hash,
 )
@@ -75,16 +74,8 @@ class PersistedHydration:
         candidates = self.compiler.fact_candidates(edges)
         if not candidates and (head or stats.entity_count or stats.relationship_count):
             raise UnsupportedArchive("No active graph facts; preserving classic hydration")
-        fingerprint = self.compiler.fingerprint(candidates)
-        previous = await self.store.current(user) or {}
         with posthog_user_context(user):
-            if (
-                previous.get("compiler") == COMPILER_VERSION
-                and previous.get("fingerprint") == fingerprint
-            ):
-                plan, reusable = previous["llm"], True
-            else:
-                plan, reusable = await organize(candidates, self.compiler.llm)
+            plan = await organize(candidates, self.compiler.llm)
         records = apply_plan(candidates, plan)
         result, _ = self.compiler.render(records, edges, stats)
         if candidates and not result.compilation_text:
@@ -98,16 +89,13 @@ class PersistedHydration:
         if not await self.store.validate(user, dependencies) or await self.store.head(user) != head:
             return False
         logger.info(
-            "Hydration bounded build: %d selected, %d covered, reused=%s",
+            "Hydration bounded build: %d selected, %d covered",
             len(candidates),
             len(dependencies),
-            previous.get("fingerprint") == fingerprint,
         )
         return await self.store.publish(
             job,
             result,
-            fingerprint=fingerprint if reusable else None,
-            plan=plan,
             dependencies=dependencies,
             head=head,
         )

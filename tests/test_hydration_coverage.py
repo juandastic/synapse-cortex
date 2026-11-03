@@ -57,21 +57,12 @@ def test_large_input_is_capped_before_model_and_keeps_whole_priority_facts():
     assert "f4999" not in rendered.metadata.included_edge_ids
 
 
-def test_fingerprint_ignores_provenance_and_ranking_but_tracks_semantic_changes():
+def test_graph_candidate_selection_does_not_depend_on_driver_row_order():
     compiler = HydrationCompiler(None)
-    rows = [edge("b"), edge("a")]
-    first = compiler.fingerprint(compiler.fact_candidates(rows))
-    shuffled = [{**e, "date": "2026-11-03", "episode_ids": ["other"], "priority": 2} for e in rows]
-    random.Random(42).shuffle(shuffled)
-    assert first == compiler.fingerprint(compiler.fact_candidates(shuffled))
-    for change in (
-        {"fact": "Dato corregido"},
-        {"source_uuid": "cousin"},
-        {"valid_at": "2026-11-01"},
-        {"correction": True},
-    ):
-        changed = [{**rows[0], **change}, rows[1]]
-        assert first != compiler.fingerprint(compiler.fact_candidates(changed))
+    rows = [edge(f"fact{i}", priority=i % 4, selection_rank=i % 7) for i in range(1000)]
+    first = compiler.fact_candidates(rows)
+    random.Random(42).shuffle(rows)
+    assert first == compiler.fact_candidates(rows)
 
 
 def test_exact_duplicates_have_stable_primary_and_cover_only_matching_subject_and_time():

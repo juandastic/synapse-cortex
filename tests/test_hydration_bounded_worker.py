@@ -37,43 +37,39 @@ def setup(edges=None):
     return (service, store, llm)
 
 
-async def test_unchanged_semantic_selection_converges_and_reuses_model_despite_provenance_change():
+async def test_every_build_runs_model_without_reading_previous_core():
+    service, store, llm = setup()
+    store.current.side_effect = AssertionError("Build must not load the previous core")
+    job = dict(user="owner", token="lease", generation=1)
+    for _ in range(3):
+        assert await service.build(job)
+    assert llm.generate_response.await_count == 3
+    store.current.assert_not_awaited()
+
+
+async def test_rebuild_uses_latest_selected_graph_facts_and_provenance():
     service, store, llm = setup()
     job = dict(user="owner", token="lease", generation=1)
     assert await service.build(job)
-    first = store.publish.await_args
-    assert llm.generate_response.await_count == 1
-    store.current.return_value = {
-        "compiler": COMPILER_VERSION,
-        "fingerprint": first.kwargs["fingerprint"],
-        "llm": first.kwargs["plan"],
-    }
     rows, head, stats = store.select.return_value
     store.select.return_value = (
-        [{**rows[0], "date": "2026-11-03", "episode_ids": ["new"]}],
+        [
+            {
+                **rows[0],
+                "fact": "Julia estudia medicina.",
+                "date": "2026-11-03",
+                "episode_ids": ["new"],
+            }
+        ],
         head,
         stats,
     )
-    for _ in range(2):
-        assert await service.build(job)
-    assert llm.generate_response.await_count == 1
-    text = store.publish.await_args.args[1].compilation_text
-    assert "2026-11-03" in text and "Julia es mi prima" in text
-    assert store.publish.await_args.args[1].metadata.included_episode_ids == ["new"]
-
-
-async def test_semantic_change_calls_model_again_and_old_compiler_never_reuses_plan():
-    service, store, llm = setup()
-    job = dict(user="owner", token="lease", generation=1)
-    assert await service.build(job)
-    first = store.publish.await_args.kwargs
-    store.current.return_value = {
-        "compiler": "old",
-        "fingerprint": first["fingerprint"],
-        "llm": first["plan"],
-    }
     assert await service.build(job)
     assert llm.generate_response.await_count == 2
+    result = store.publish.await_args.args[1]
+    assert "Julia estudia medicina." in result.compilation_text
+    assert "2026-11-03" in result.compilation_text
+    assert result.metadata.included_episode_ids == ["new"]
 
 
 @pytest.mark.parametrize("failure", ["deps", "head"])
@@ -91,7 +87,6 @@ async def test_provider_failure_preserves_details_and_retry_occurs_only_on_next_
     service, store, llm = setup()
     llm.generate_response.side_effect = RuntimeError("offline")
     assert await service.build(dict(user="owner", token="lease", generation=1))
-    assert store.publish.await_args.kwargs["fingerprint"] is None
     assert "Julia es mi prima" in store.publish.await_args.args[1].compilation_text
     assert llm.generate_response.await_count == 1
 
@@ -133,7 +128,7 @@ async def test_cache_failure_does_not_block_publication_and_dependency_check_is_
     assert order == ["cache", "validate"]
 
 
-async def test_publish_contains_only_bounded_decisions_and_dependencies_and_is_fenced():
+async def test_publish_contains_only_result_and_dependencies_and_is_fenced():
     service, stub, _ = setup()
     await service.build(dict(user="owner"))
     call = stub.publish.await_args
@@ -152,7 +147,7 @@ async def test_publish_contains_only_bounded_decisions_and_dependencies_and_is_f
     import json
 
     payload = json.loads(params["payload"])
-    assert set(payload) == {"compiler", "fingerprint", "llm", "deps", "head_episode", "result"}
+    assert set(payload) == {"compiler", "deps", "head_episode", "result"}
     assert params["user"] == "owner" and params["generation"] == 2
     assert payload["result"] == asdict(call.args[1])
 

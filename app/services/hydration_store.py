@@ -207,14 +207,12 @@ class HydrationStore:
             terminal=terminal,
         )
 
-    async def publish(self, job, result, *, fingerprint, plan, dependencies, head):
+    async def publish(self, job, result, *, dependencies, head):
         revision = str(uuid4())
         result.metadata.compilation_revision = revision
         payload = json.dumps(
             {
                 "compiler": COMPILER_VERSION,
-                "fingerprint": fingerprint,
-                "llm": plan,
                 "deps": dependencies,
                 "head_episode": head,
                 "result": asdict(result),

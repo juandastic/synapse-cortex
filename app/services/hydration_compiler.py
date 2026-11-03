@@ -14,7 +14,7 @@ from app.services.hydration_result import (
 )
 from app.services.hydration_selection import INPUT_CHARS, MAX_FACTS
 
-COMPILER_VERSION = "prioritized-core-2"
+COMPILER_VERSION = "prioritized-core-3"
 CHAR_BUDGET = 120_000
 logger = logging.getLogger(__name__)
 
@@ -110,26 +110,6 @@ class HydrationCompiler:
                 result.append(candidate)
                 size += cost
         return result
-
-    @staticmethod
-    def fingerprint(candidates):
-        return digest(
-            [
-                COMPILER_VERSION,
-                [
-                    [
-                        c["id"],
-                        c["quote"],
-                        c.get("valid_at"),
-                        c.get("invalid_at"),
-                        c.get("source_uuid"),
-                        c.get("target_uuid"),
-                        c.get("correction", False),
-                    ]
-                    for c in sorted(candidates, key=lambda c: c["id"])
-                ],
-            ]
-        )
 
     def render(self, grouped: list[dict], edges: list[dict], stats: GraphStats):
         header = (
