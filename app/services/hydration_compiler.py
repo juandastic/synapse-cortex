@@ -47,6 +47,7 @@ def priority_order(records):
             not bool(c.get("correction")),
             c.get("semantic_rank", float("inf")),
             c.get("priority", 2),
+            c.get("selection_rank", 0),
         )
     )
     return ordered
@@ -79,6 +80,9 @@ class HydrationCompiler:
                 )
                 candidate["correction"] |= bool(edge.get("correction"))
                 candidate["priority"] = min(candidate["priority"], edge.get("priority", 2))
+                candidate["selection_rank"] = min(
+                    candidate["selection_rank"], edge.get("selection_rank", 0)
+                )
                 if (edge.get("date") or "unknown") > candidate["date"]:
                     candidate["date"] = edge.get("date") or "unknown"
                     candidate["date_kind"] = edge.get("date_kind", "registro")
@@ -94,6 +98,7 @@ class HydrationCompiler:
                 date_kind=edge.get("date_kind", "registro"),
                 correction=bool(edge.get("correction")),
                 priority=edge.get("priority", 2),
+                selection_rank=edge.get("selection_rank", 0),
                 episode_ids=edge.get("episode_ids", []),
                 valid_at=edge.get("valid_at"),
                 invalid_at=edge.get("invalid_at"),

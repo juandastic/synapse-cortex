@@ -262,7 +262,7 @@ async def test_unknown_duplicate_and_missing_priority_ids_do_not_remove_literal_
     records = apply_plan(source, plan)
     assert {r["id"] for r in records} == {"0", "1"}
     assert next(r for r in records if r["id"] == "1")["semantic_rank"] == 0
-    assert next(r for r in records if r["id"] == "0")["semantic_rank"] == 1
+    assert next(r for r in records if r["id"] == "0")["semantic_rank"] == 0.25
 
 
 def test_merged_record_inherits_its_highest_priority_member():
@@ -276,3 +276,35 @@ def test_merged_record_inherits_its_highest_priority_member():
     )
     assert len(records) == 1 and records[0]["semantic_rank"] == 0
     assert {f["id"] for f in records[0]["source_facts"]} == {"0", "1"}
+
+
+def test_unranked_early_graph_fact_can_reach_core_when_budget_is_tight():
+    compiler = HydrationCompiler(None, char_budget=1100)
+    rows = [
+        dict(
+            uuid="early",
+            fact="Necesita ayuda práctica para preparar comidas.",
+            source_uuid="user",
+            target_uuid="routine",
+            priority=1,
+            date="2026-11-02",
+        )
+    ]
+    rows += [
+        dict(
+            uuid=f"ranked{i:02}",
+            fact="Detalle personal " + str(i) + " " + ("x" * 110),
+            source_uuid="user",
+            target_uuid=str(i),
+            priority=1,
+            date="2026-11-01",
+        )
+        for i in range(20)
+    ]
+    source = compiler.fact_candidates(rows)
+    plan = {"priority_ids": [f"ranked{i:02}" for i in range(20)]}
+    result, _ = compiler.render(apply_plan(source, plan), rows, GraphStats(22, 21))
+    assert len(result.compilation_text) <= 1100
+    assert "early" in result.metadata.included_edge_ids
+    assert len(result.metadata.included_edge_ids) < len(rows)
+    assert set(result.metadata.included_edge_ids) <= {f["id"] for f in source}

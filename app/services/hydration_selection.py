@@ -9,8 +9,11 @@ RECENT_FACTS = 150
 HUBS = 15
 FACTS_PER_HUB = 8
 DIVERSE_HUBS = 2
-FACTS_PER_DIVERSE_HUB = 400
 MAX_FACTS = 800
+# Reserve room for every lane before reading diverse fact text.
+FACTS_PER_DIVERSE_HUB = (
+    MAX_FACTS - CORRECTION_FACTS - RECENT_FACTS - HUBS * FACTS_PER_HUB
+) // DIVERSE_HUBS
 INPUT_CHARS = 120_000
 CORRECTION_NAMES = ["user_memory_correction", "notion_correction"]
 
@@ -190,9 +193,10 @@ async def select(store, user):
             per_hub=per_hub,
         )
         for hub in rows:
-            for row in hub["facts"]:
+            for rank, row in enumerate(hub["facts"]):
                 selected.setdefault(
-                    row["uuid"], {**row, "priority": priority, "date_kind": "registro"}
+                    row["uuid"],
+                    {**row, "priority": priority, "date_kind": "registro", "selection_rank": rank},
                 )
     stats = (await store.rows(STATS_QUERY, user=user))[0]
     return (

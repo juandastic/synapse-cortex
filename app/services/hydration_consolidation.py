@@ -9,6 +9,7 @@ from graphiti_core.prompts.models import Message
 from pydantic import BaseModel, Field
 
 from app.services import hydration_result
+from app.services.hydration_compiler import priority_order
 
 logger = logging.getLogger(__name__)
 ORGANIZE_PROMPT = """Organiza una memoria personal detallada de Synapse, sin comprimirla.
@@ -157,7 +158,7 @@ async def organize(facts, llm):
     )
     if len(priority_ids) < len(facts):
         logger.warning(
-            "Hydration priority omitted %d IDs; preserving graph fallback order",
+            "Hydration priority omitted %d IDs; interleaving graph fallback order",
             len(facts) - len(priority_ids),
         )
     plan = {"sections": sections, "records": [], "priority_ids": priority_ids}
@@ -201,11 +202,21 @@ async def organize(facts, llm):
 
 def apply_plan(facts, plan):
     """Reapply cached decisions to current provenance, never cached source copies."""
-    ranks = {cid: i for i, cid in enumerate(dict.fromkeys(plan.get("priority_ids", [])))}
+    ordered = priority_order(facts)
+    known = {f["id"] for f in facts}
+    ranks = {
+        cid: i
+        for i, cid in enumerate(
+            dict.fromkeys(cid for cid in plan.get("priority_ids", []) if cid in known)
+        )
+    }
+    # Missing is not a negative relevance judgment. Keep each omitted fact's
+    # relative graph position on the same scale as the model's partial order.
+    fallback_scale = len(ranks) / len(ordered) if ordered else 0
     grouped = [
         {
             **f,
-            "semantic_rank": ranks.get(f["id"], len(ranks)),
+            "semantic_rank": ranks.get(f["id"], (index + 0.5) * fallback_scale),
             "fact_section": plan.get("sections", {}).get(f["id"])
             or (
                 "Correcciones del usuario"
@@ -215,7 +226,7 @@ def apply_plan(facts, plan):
                 else "Recuerdos relevantes"
             ),
         }
-        for f in facts
+        for index, f in enumerate(ordered)
     ]
     by_id = {f["id"]: f for f in grouped}
     replacements, covered = {}, set()

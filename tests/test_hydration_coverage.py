@@ -122,7 +122,7 @@ async def test_selection_uses_bounded_queries_isolates_user_and_fills_legacy_gap
             assert params["hub_candidates"] == 30 and params["per_hub"] == 8
             return [{"facts": [edge("hub", episode_ids=[]), edge("recent")]}]
         if query == DIVERSITY_QUERY:
-            assert params["hubs"] == 2 and params["per_hub"] == 400
+            assert params["hubs"] == 2 and params["per_hub"] == 235
             return [{"facts": [edge("diverse", episode_ids=[])]}]
         assert query == STATS_QUERY
         return [{"entities": 1000, "relationships": 5000}]
@@ -239,3 +239,59 @@ def test_retired_facts_stay_out_and_fact_text_does_not_trigger_business_exclusio
     assert "Es mi prima" in result.compilation_text
     assert "La usuaria toma X" not in result.compilation_text
     assert "No guardes rencor" in result.compilation_text
+
+
+def test_diverse_query_order_survives_candidate_count_limit_and_duplicate_aliases():
+    rows = [edge(f"prefix{i}", priority=1) for i in range(322)]
+    rows += [edge("rare", priority=3, date="2019-01-01", selection_rank=0)]
+    rows += [edge(f"repeated{i}", priority=3, selection_rank=i + 1) for i in range(799)]
+    compiler = HydrationCompiler(None)
+    candidates = compiler.fact_candidates(rows)
+    assert len(candidates) == 800
+    assert "rare" in {c["id"] for c in candidates}
+    # Exact duplicates retain the earliest selection slot, regardless of UUID.
+    duplicate = [
+        edge("a", fact="Dato estable.", target_uuid="one", priority=3, selection_rank=10),
+        edge("b", fact="Dato estable.", target_uuid="one", priority=3, selection_rank=0),
+    ]
+    assert compiler.fact_candidates(duplicate)[0]["selection_rank"] == 0
+
+
+async def test_select_to_candidates_preserves_old_diverse_fact_under_text_budget():
+    from app.services.hydration_selection import FACTS_PER_DIVERSE_HUB
+
+    def long(cid, **kw):
+        return edge(cid, fact=cid + " " + ("x" * 180), **kw)
+
+    async def rows(query, **params):
+        if query == HEAD_QUERY:
+            return [{"uuid": "ep"}]
+        if query == RECENT_QUERY:
+            return (
+                [long(f"correction{i}", correction=True) for i in range(60)]
+                if params["corrections"]
+                else [long(f"recent{i}") for i in range(150)]
+            )
+        if query == HUB_QUERY:
+            return [
+                {"facts": [long(f"hub{h}-{i}", episode_ids=[]) for i in range(8)]}
+                for h in range(15)
+            ]
+        if query == DIVERSITY_QUERY:
+            assert params["per_hub"] == FACTS_PER_DIVERSE_HUB == 235
+            first = [long("rare", date="2019-01-01", episode_ids=[])] + [
+                long(f"diverse0-{i}", episode_ids=[]) for i in range(234)
+            ]
+            second = [long(f"diverse1-{i}", episode_ids=[]) for i in range(235)]
+            return [{"facts": first}, {"facts": second}]
+        assert query == STATS_QUERY
+        return [{"entities": 1000, "relationships": 5000}]
+
+    store = HydrationStore(None)
+    store.rows = rows
+    selected, _, _ = await store.select("owner")
+    assert len(selected) == 800
+    candidates = HydrationCompiler(None).fact_candidates(selected)
+    assert len(candidates) < len(selected)  # Text cap, even when count fits.
+    assert "rare" in {c["id"] for c in candidates}
+    assert sum(len(c["quote"]) for c in candidates) <= INPUT_CHARS
