@@ -2,8 +2,6 @@
 
 from app.services.hydration_result import GraphStats
 
-CORRECTION_EPISODES = 20
-CORRECTION_FACTS = 60
 RECENT_EPISODES = 30
 RECENT_FACTS = 150
 HUBS = 15
@@ -11,11 +9,8 @@ FACTS_PER_HUB = 8
 DIVERSE_HUBS = 2
 MAX_FACTS = 800
 # Reserve room for every lane before reading diverse fact text.
-FACTS_PER_DIVERSE_HUB = (
-    MAX_FACTS - CORRECTION_FACTS - RECENT_FACTS - HUBS * FACTS_PER_HUB
-) // DIVERSE_HUBS
+FACTS_PER_DIVERSE_HUB = (MAX_FACTS - RECENT_FACTS - HUBS * FACTS_PER_HUB) // DIVERSE_HUBS
 INPUT_CHARS = 120_000
-CORRECTION_NAMES = ["user_memory_correction", "notion_correction"]
 
 # localdatetime normalizes both Graphiti's naive timestamps and legacy zoned values.
 ACTIVE = """r.expired_at IS NULL AND
@@ -23,8 +18,6 @@ ACTIVE = """r.expired_at IS NULL AND
 FIELDS = """r.uuid AS uuid,r.fact AS fact,
     toString(r.valid_at) AS valid_at,toString(r.invalid_at) AS invalid_at,
     a.uuid AS source_uuid,b.uuid AS target_uuid"""
-CORRECTION = """EXISTS {MATCH (c:Episodic {group_id:$user})
-    WHERE c.source='text' AND c.name IN $names AND c.uuid IN r.episodes}"""
 HEAD_QUERY = """
 MATCH (e:Episodic {group_id:$user})
 WITH e ORDER BY e.created_at DESC,e.uuid DESC LIMIT 1
@@ -33,7 +26,6 @@ RETURN e.uuid AS uuid
 RECENT_QUERY = (
     """
 MATCH (e:Episodic {group_id:$user})
-WHERE NOT $corrections OR (e.source='text' AND e.name IN $names)
 WITH e ORDER BY localdatetime({datetime:e.valid_at}) DESC,e.uuid LIMIT $episode_limit
 UNWIND coalesce(e.entity_edges,[]) AS id
 MATCH (a)-[r:RELATES_TO {uuid:id}]->(b)
@@ -41,13 +33,10 @@ WHERE r.group_id=$user AND a.group_id=$user AND b.group_id=$user AND """
     + ACTIVE
     + """
 WITH a,b,r,max(toString(e.valid_at)) AS date,collect(DISTINCT e.uuid) AS episode_ids
-WITH a,b,r,date,episode_ids,"""
-    + CORRECTION
-    + """ AS correction
-ORDER BY correction DESC,date DESC,r.uuid LIMIT $fact_limit
+ORDER BY date DESC,r.uuid LIMIT $fact_limit
 RETURN """
     + FIELDS
-    + """,date,episode_ids,correction
+    + """,date,episode_ids
 """
 )
 LEGACY_QUERY = (
@@ -59,10 +48,7 @@ WHERE a.group_id=$user AND b.group_id=$user AND NOT r.uuid IN $excluded AND """
 WITH a,b,r ORDER BY r.created_at DESC,r.uuid LIMIT $limit
 RETURN """
     + FIELDS
-    + """,toString(r.created_at) AS date,[] AS episode_ids,
-"""
-    + CORRECTION
-    + """ AS correction
+    + """,toString(r.created_at) AS date,[] AS episode_ids
 """
 )
 HUB_QUERY = (
@@ -81,10 +67,7 @@ CALL {
     WITH n,a,r
     RETURN collect({uuid:r.uuid,fact:r.fact,valid_at:toString(r.valid_at),
         invalid_at:toString(r.invalid_at),date:toString(r.created_at),episode_ids:[],
-        source_uuid:startNode(r).uuid,target_uuid:endNode(r).uuid,
-        correction:"""
-    + CORRECTION
-    + """}) AS facts
+        source_uuid:startNode(r).uuid,target_uuid:endNode(r).uuid}) AS facts
 }
 WITH n,degree,facts WHERE size(facts)>0
 ORDER BY degree DESC,n.uuid LIMIT $hubs
@@ -112,10 +95,7 @@ CALL {
     ORDER BY position,r.created_at DESC,r.uuid LIMIT $per_hub
     RETURN collect({uuid:r.uuid,fact:r.fact,valid_at:toString(r.valid_at),
         invalid_at:toString(r.invalid_at),date:toString(r.created_at),episode_ids:[],
-        source_uuid:startNode(r).uuid,target_uuid:endNode(r).uuid,
-        correction:"""
-    + CORRECTION
-    + """}) AS facts
+        source_uuid:startNode(r).uuid,target_uuid:endNode(r).uuid}) AS facts
 }
 WITH n,degree,facts WHERE size(facts)>0
 ORDER BY degree DESC,n.uuid LIMIT $hubs
@@ -145,36 +125,19 @@ STATS_QUERY = (
 async def select(store, user):
     head = await store.head(user)
     selected = {}
-    for corrections, episodes, facts in (
-        (True, CORRECTION_EPISODES, CORRECTION_FACTS),
-        (False, RECENT_EPISODES, RECENT_FACTS),
-    ):
-        rows = await store.rows(
-            RECENT_QUERY,
-            user=user,
-            corrections=corrections,
-            names=CORRECTION_NAMES,
-            episode_limit=episodes,
-            fact_limit=facts,
-        )
-        for row in rows:
-            cid = row["uuid"]
-            if cid in selected:
-                selected[cid]["episode_ids"] = sorted(
-                    set(selected[cid]["episode_ids"] + row["episode_ids"])
-                )
-            else:
-                selected[cid] = {
-                    **row,
-                    "priority": 0 if corrections else 1,
-                    "date_kind": "episodio",
-                }
-    recent_count = sum(c["priority"] == 1 for c in selected.values())
+    rows = await store.rows(
+        RECENT_QUERY,
+        user=user,
+        episode_limit=RECENT_EPISODES,
+        fact_limit=RECENT_FACTS,
+    )
+    for row in rows:
+        selected[row["uuid"]] = {**row, "priority": 1, "date_kind": "episodio"}
+    recent_count = len(selected)
     if recent_count < RECENT_FACTS:
         for row in await store.rows(
             LEGACY_QUERY,
             user=user,
-            names=CORRECTION_NAMES,
             excluded=list(selected),
             limit=RECENT_FACTS - recent_count,
         ):
@@ -186,7 +149,6 @@ async def select(store, user):
         rows = await store.rows(
             query,
             user=user,
-            names=CORRECTION_NAMES,
             excluded=list(selected),
             hub_candidates=hubs * 2,
             hubs=hubs,

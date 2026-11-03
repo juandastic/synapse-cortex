@@ -93,6 +93,17 @@ async def test_one_organization_and_one_review_cover_all_originals_with_dates():
     ]
 
 
+async def test_seed_provenance_does_not_add_a_correction_hint_to_model_input():
+    import json
+
+    source = facts()
+    source[0]["correction"] = True
+    llm = provider()
+    await prioritize(source, llm)
+    sent = json.loads(llm.generate_response.await_args.args[0][-1].content)
+    assert all("correction" not in fact for fact in sent["facts"])
+
+
 @pytest.mark.parametrize("ids", [["F1", "fake"], ["F1", "F1"], ["F1"], []])
 async def test_invalid_proposal_ids_do_not_suppress_any_literal_or_trigger_review(ids):
     llm = provider(records=[{"text": "rewrite", "ids": ids}])
@@ -112,7 +123,6 @@ async def test_invalid_proposal_ids_do_not_suppress_any_literal_or_trigger_revie
         {"valid_at": "2025-01-01"},
         {"invalid_at": "2027-01-01"},
         {"date": "2026-11-03"},
-        {"correction": True},
     ],
 )
 async def test_different_subjects_and_temporal_scopes_stay_separate(difference):
