@@ -14,7 +14,7 @@ from app.services.hydration_result import (
 )
 from app.services.hydration_selection import INPUT_CHARS, MAX_FACTS
 
-COMPILER_VERSION = "prioritized-core-1"
+COMPILER_VERSION = "prioritized-core-2"
 CHAR_BUDGET = 120_000
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,13 @@ def fact_hash(edge: dict) -> str:
 def priority_order(records):
     ordered = sorted(records, key=lambda c: c["id"])
     ordered.sort(key=lambda c: c.get("date") if c.get("date") != "unknown" else "", reverse=True)
-    ordered.sort(key=lambda c: (not bool(c.get("correction")), c.get("priority", 2)))
+    ordered.sort(
+        key=lambda c: (
+            not bool(c.get("correction")),
+            c.get("semantic_rank", float("inf")),
+            c.get("priority", 2),
+        )
+    )
     return ordered
 
 

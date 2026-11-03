@@ -9,6 +9,7 @@ from app.services.hydration_consolidation import apply_plan
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.hydration_selection import (
     CORRECTION_FACTS,
+    DIVERSITY_QUERY,
     HEAD_QUERY,
     HUB_QUERY,
     INPUT_CHARS,
@@ -51,7 +52,8 @@ def test_large_input_is_capped_before_model_and_keeps_whole_priority_facts():
     assert all((c["quote"] == originals[c["id"]] for c in candidates))
     rendered, _ = compiler.render(apply_plan(candidates, {}), edges, GraphStats(1000, 5000))
     assert len(rendered.compilation_text) <= compiler.char_budget
-    assert set(rendered.metadata.included_edge_ids) == {c["id"] for c in candidates}
+    assert set(rendered.metadata.included_edge_ids) <= {c["id"] for c in candidates}
+    assert "correction" in rendered.metadata.included_edge_ids
     assert "f4999" not in rendered.metadata.included_edge_ids
 
 
@@ -117,18 +119,21 @@ async def test_selection_uses_bounded_queries_isolates_user_and_fills_legacy_gap
             assert params["limit"] == RECENT_FACTS - 1
             return [edge("legacy", episode_ids=[])]
         if query == HUB_QUERY:
-            assert params["hub_candidates"] == 30 and params["per_hub"] == 15
+            assert params["hub_candidates"] == 30 and params["per_hub"] == 8
             return [{"facts": [edge("hub", episode_ids=[]), edge("recent")]}]
+        if query == DIVERSITY_QUERY:
+            assert params["hubs"] == 2 and params["per_hub"] == 400
+            return [{"facts": [edge("diverse", episode_ids=[])]}]
         assert query == STATS_QUERY
         return [{"entities": 1000, "relationships": 5000}]
 
     store = HydrationStore(None)
     store.rows = rows
     selected, head, stats = await store.select("owner")
-    assert {e["uuid"] for e in selected} == {"correction", "recent", "legacy", "hub"}
+    assert {e["uuid"] for e in selected} == {"correction", "recent", "legacy", "hub", "diverse"}
     assert head == "ep" and stats.relationship_count == 5000
     assert next((e for e in selected if e["uuid"] == "hub"))["priority"] == 2
-    assert len(calls) == 6
+    assert len(calls) == 7
     for query, _params in calls:
         assert ".content" not in query and ".summary" not in query
         if query not in (STATS_QUERY,):
@@ -146,6 +151,7 @@ async def test_full_recent_quota_skips_legacy_fill():
         side_effect=[
             [],
             [edge(str(i)) for i in range(RECENT_FACTS)],
+            [],
             [],
             [{"entities": 1000, "relationships": 5000}],
         ]

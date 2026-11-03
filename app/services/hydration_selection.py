@@ -7,9 +7,11 @@ CORRECTION_FACTS = 60
 RECENT_EPISODES = 30
 RECENT_FACTS = 150
 HUBS = 15
-FACTS_PER_HUB = 15
-MAX_FACTS = 400
-INPUT_CHARS = 80_000
+FACTS_PER_HUB = 8
+DIVERSE_HUBS = 2
+FACTS_PER_DIVERSE_HUB = 400
+MAX_FACTS = 800
+INPUT_CHARS = 120_000
 CORRECTION_NAMES = ["user_memory_correction", "notion_correction"]
 
 # localdatetime normalizes both Graphiti's naive timestamps and legacy zoned values.
@@ -86,6 +88,37 @@ ORDER BY degree DESC,n.uuid LIMIT $hubs
 RETURN facts
 """
 )
+# Round-robin across (neighbor, relation kind) before repeating a pair.
+# The ordering reads relationship metadata; fact text is projected after LIMIT.
+DIVERSITY_QUERY = (
+    """
+MATCH (n:Entity {group_id:$user})
+WITH n,COUNT{(n)-[:RELATES_TO]-()} AS degree
+ORDER BY degree DESC,n.uuid LIMIT $hub_candidates
+CALL {
+    WITH n
+    MATCH (n)-[r:RELATES_TO]-(a)
+    WHERE r.group_id=$user AND a.group_id=$user AND NOT r.uuid IN $excluded AND """
+    + ACTIVE
+    + """
+    WITH r,a.uuid AS neighbor,coalesce(r.name,'') AS kind
+    ORDER BY r.created_at DESC,r.uuid
+    WITH neighbor,kind,collect(r) AS members
+    UNWIND range(0,size(members)-1) AS position
+    WITH members[position] AS r,position
+    ORDER BY position,r.created_at DESC,r.uuid LIMIT $per_hub
+    RETURN collect({uuid:r.uuid,fact:r.fact,valid_at:toString(r.valid_at),
+        invalid_at:toString(r.invalid_at),date:toString(r.created_at),episode_ids:[],
+        source_uuid:startNode(r).uuid,target_uuid:endNode(r).uuid,
+        correction:"""
+    + CORRECTION
+    + """}) AS facts
+}
+WITH n,degree,facts WHERE size(facts)>0
+ORDER BY degree DESC,n.uuid LIMIT $hubs
+RETURN facts
+"""
+)
 VALIDATE_QUERY = (
     """
 UNWIND $ids AS id
@@ -143,18 +176,24 @@ async def select(store, user):
             limit=RECENT_FACTS - recent_count,
         ):
             selected[row["uuid"]] = {**row, "priority": 1, "date_kind": "registro"}
-    hubs = await store.rows(
-        HUB_QUERY,
-        user=user,
-        names=CORRECTION_NAMES,
-        excluded=list(selected),
-        hub_candidates=HUBS * 2,
-        hubs=HUBS,
-        per_hub=FACTS_PER_HUB,
-    )
-    for hub in hubs:
-        for row in hub["facts"]:
-            selected.setdefault(row["uuid"], {**row, "priority": 2, "date_kind": "registro"})
+    for query, hubs, per_hub, priority in (
+        (HUB_QUERY, HUBS, FACTS_PER_HUB, 2),
+        (DIVERSITY_QUERY, DIVERSE_HUBS, FACTS_PER_DIVERSE_HUB, 3),
+    ):
+        rows = await store.rows(
+            query,
+            user=user,
+            names=CORRECTION_NAMES,
+            excluded=list(selected),
+            hub_candidates=hubs * 2,
+            hubs=hubs,
+            per_hub=per_hub,
+        )
+        for hub in rows:
+            for row in hub["facts"]:
+                selected.setdefault(
+                    row["uuid"], {**row, "priority": priority, "date_kind": "registro"}
+                )
     stats = (await store.rows(STATS_QUERY, user=user))[0]
     return (
         list(selected.values()),

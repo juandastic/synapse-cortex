@@ -201,3 +201,78 @@ async def test_merged_record_over_budget_falls_back_to_whole_sources():
     assert set(result.metadata.included_edge_ids) == {"0", "1"}
     assert "café por la mañana." in result.compilation_text
     assert len(result.compilation_text) <= 1300
+
+
+async def test_semantic_priority_places_older_personal_detail_before_connected_recent_noise():
+    compiler = HydrationCompiler(None, char_budget=1100)
+    rows = [
+        dict(
+            uuid="personal",
+            fact="Necesita apoyo para organizar las comidas.",
+            source_uuid="user",
+            target_uuid="routine",
+            priority=3,
+            date="2020-01-01",
+        ),
+        *[
+            dict(
+                uuid=f"noise{i}",
+                fact="Dato enciclopédico " + str(i) + " " + ("x" * 100),
+                source_uuid="user",
+                target_uuid=str(i),
+                priority=1,
+                date="2026-11-01",
+            )
+            for i in range(10)
+        ],
+    ]
+    source = compiler.fact_candidates(rows)
+    # Aliases follow canonical UUID order, independently of graph ranking.
+    aliases = {f["id"]: f"F{i}" for i, f in enumerate(sorted(source, key=lambda f: f["id"]), 1)}
+    llm = SimpleNamespace(
+        generate_response=AsyncMock(
+            return_value={
+                "groups": [],
+                "records": [],
+                "priority_ids": [aliases["personal"]],
+            }
+        )
+    )
+    plan, _ = await organize(source, llm)
+    result, _ = compiler.render(apply_plan(source, plan), rows, GraphStats(12, 11))
+    assert result.metadata.included_edge_ids[0] == "personal"
+    assert "Necesita apoyo para organizar las comidas." in result.compilation_text
+    assert len(result.compilation_text) <= 1100
+    assert len(result.metadata.included_edge_ids) < len(rows)
+
+
+async def test_unknown_duplicate_and_missing_priority_ids_do_not_remove_literal_facts():
+    source = facts()
+    llm = SimpleNamespace(
+        generate_response=AsyncMock(
+            return_value={
+                "groups": [],
+                "records": [],
+                "priority_ids": ["fake", "F2", "F2"],
+            }
+        )
+    )
+    plan, _ = await organize(source, llm)
+    assert plan["priority_ids"] == ["1"]
+    records = apply_plan(source, plan)
+    assert {r["id"] for r in records} == {"0", "1"}
+    assert next(r for r in records if r["id"] == "1")["semantic_rank"] == 0
+    assert next(r for r in records if r["id"] == "0")["semantic_rank"] == 1
+
+
+def test_merged_record_inherits_its_highest_priority_member():
+    source = facts()
+    records = apply_plan(
+        source,
+        {
+            "priority_ids": ["1", "0"],
+            "records": [{"ids": ["0", "1"], "text": "Le gustan el café y el té por la mañana."}],
+        },
+    )
+    assert len(records) == 1 and records[0]["semantic_rank"] == 0
+    assert {f["id"] for f in records[0]["source_facts"]} == {"0", "1"}

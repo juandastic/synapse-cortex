@@ -198,5 +198,22 @@ async def test_large_graph_needs_at_most_two_model_calls_after_input_caps():
     assert await service.build(dict(user="owner"))
     assert llm.generate_response.await_count == 2
     sent = json.loads(llm.generate_response.await_args_list[0].args[0][-1].content)["facts"]
-    assert len(sent) <= 400 and sum((len(f["text"]) for f in sent)) <= 80000
-    assert len(store.publish.await_args.args[1].metadata.included_edge_ids) <= 400
+    assert len(sent) <= 800 and sum((len(f["text"]) for f in sent)) <= 120000
+    assert len(store.publish.await_args.args[1].metadata.included_edge_ids) <= 800
+
+
+async def test_core_can_be_deleted_and_regenerated_without_carrying_previous_decisions():
+    import json
+
+    service, store, llm = setup()
+    llm.generate_response.return_value = {"priority_ids": ["F1"], "groups": [], "records": []}
+    job = dict(user="owner", token="lease", generation=1)
+    assert await service.build(job)
+    first = store.publish.await_args.args[1]
+    store.current.return_value = None
+    assert await service.build(job)
+    regenerated = store.publish.await_args.args[1]
+    assert llm.generate_response.await_count == 2
+    assert first.metadata.included_edge_ids == regenerated.metadata.included_edge_ids
+    inputs = [json.loads(c.args[0][-1].content) for c in llm.generate_response.await_args_list]
+    assert inputs[0] == inputs[1] and set(inputs[0]) == {"facts"}
