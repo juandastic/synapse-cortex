@@ -3,19 +3,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
-import pytest
 from fastapi import FastAPI
 
 from app.api.routes import router
 from app.core import security
 from app.schemas.models import ChatCompletionRequest
 from app.services.hydration import HydrationService
-from app.services.hydration_compiler import (
-    HydrationCompiler,
-)
+from app.services.hydration_compiler import HydrationCompiler
 from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.hydration_store import HydrationStore
-from app.services.persisted_hydration import PersistedHydration, UnsupportedArchive
+from app.services.persisted_hydration import PersistedHydration
 
 FACT = "Mi prima Julia es quien estudia ingeniería en Bogotá."
 
@@ -47,21 +44,6 @@ async def test_current_text_still_updates_coverage_metadata():
     assert request.cache_name == "cachedContents/same-text"
 
 
-async def test_selection_reuses_previous_group_when_model_omits_or_blanks_its_title():
-    compiler = HydrationCompiler(
-        SimpleNamespace(
-            generate_response=AsyncMock(
-                return_value={"groups": [{"title": "  ", "ids": ["claim"]}]}
-            )
-        )
-    )
-    candidates = compiler.fact_candidates(
-        [episode()], [dict(uuid="claim", fact=FACT, episodes=["ep"])]
-    )
-    selected = await compiler.group([{**candidates[0], "fact_section": "Mi prima y sus estudios"}])
-    assert selected[0]["fact_section"] == "Mi prima y sus estudios"
-
-
 def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
     compiler = HydrationCompiler(None, char_budget=1100)
     edges = [
@@ -80,7 +62,9 @@ def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
             target_uuid="university",
         ),
     ]
-    candidates = compiler.fact_candidates([episode()], edges)
+    candidates = compiler.fact_candidates(
+        [{**e, "date": "2026-10-30", "episode_ids": ["ep"]} for e in edges]
+    )
     result, retained = compiler.render([candidates[0]], edges, GraphStats(2, 2))
     assert "Mi prima Julia" in result.compilation_text
     assert "2026-10-30" in result.compilation_text
@@ -89,7 +73,6 @@ def test_render_preserves_third_party_and_only_deduplicates_complete_facts():
     assert result.metadata.is_partial
     assert len(result.compilation_text) <= 1100
     assert len(retained) == 1
-    # An omitted claim must never suppress its sources in RAG.
     empty, retained = HydrationCompiler(None, char_budget=10).render(
         [candidates[0]], edges, GraphStats(2, 2)
     )
@@ -113,7 +96,7 @@ async def test_hydration_reads_publication_and_preserves_v1_and_cold_v2_fallback
 
 async def test_cold_read_enqueues_work_and_provider_failure_does_not_block_http():
     store = SimpleNamespace(read=AsyncMock(return_value=None), request=AsyncMock())
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     assert await service.read("owner") is None
     store.request.assert_awaited_once_with("owner")
     store.read.side_effect = RuntimeError("database unavailable")
@@ -125,111 +108,19 @@ async def test_old_compilation_format_enqueues_rebuild_without_parsing_retired_p
     store.current = AsyncMock(return_value={"compiler": "older-format", "result": {}})
     store.request = AsyncMock()
     store.stamp = AsyncMock()
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     assert await service.read("owner") is None
     store.request.assert_awaited_once_with("owner")
     store.stamp.assert_not_awaited()
 
 
-@pytest.mark.parametrize("sections", [[{"id": "claim", "section": "Mi familia"}], []])
-async def test_worker_preserves_full_fact_even_when_grouping_omits_its_id(sections):
-    ep = episode()
-    compiler = HydrationCompiler(
-        SimpleNamespace(
-            generate_response=AsyncMock(
-                return_value={
-                    "groups": [{"title": item["section"], "ids": [item["id"]]} for item in sections]
-                }
-            )
-        )
-    )
-    store = SimpleNamespace(
-        stamp=AsyncMock(return_value="stamp"),
-        snapshot=AsyncMock(
-            return_value=(
-                [ep],
-                [
-                    dict(
-                        uuid="claim",
-                        fact=FACT,
-                        episodes=["ep"],
-                        source_uuid="cousin",
-                        target_uuid="school",
-                    )
-                ],
-            )
-        ),
-        publish=AsyncMock(return_value=True),
-        current=AsyncMock(return_value=None),
-        group_cache=lambda job: None,
-    )
-    legacy = SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=GraphStats(0, 0)))
-    service = PersistedHydration(store, compiler, legacy)
-    assert await service.build(dict(user="owner", token="lease", generation=1))
-    assert compiler.llm.generate_response.await_count == 1
-    assert "Mi prima Julia" in store.publish.await_args.args[2].compilation_text
-    store.publish.assert_awaited_once()
-    store.publish.reset_mock()
-    store.stamp.side_effect = ["before", "after"]
-    store.request = AsyncMock()
-    assert not await service.build(dict(user="owner", token="lease", generation=1))
-    store.publish.assert_not_awaited()
-    store.request.assert_not_awaited()
-
-
-@pytest.mark.parametrize(
-    "episodes, stats", [([], GraphStats(2, 1)), ([episode()], GraphStats(0, 0))]
-)
-async def test_incomplete_archive_keeps_legacy_memory_instead_of_publishing_empty_profile(
-    episodes, stats
-):
-    store = SimpleNamespace(
-        stamp=AsyncMock(return_value="stamp"),
-        snapshot=AsyncMock(return_value=(episodes, [])),
-        publish=AsyncMock(),
-        current=AsyncMock(return_value=None),
-        group_cache=lambda job: None,
-    )
-    service = PersistedHydration(
-        store,
-        HydrationCompiler(None),
-        SimpleNamespace(fetch_graph_stats=AsyncMock(return_value=stats)),
-    )
-    with pytest.raises(UnsupportedArchive):
-        await service.build(dict(user="owner", token="lease", generation=1))
-    store.publish.assert_not_awaited()
-
-
 async def test_worker_failure_keeps_durable_work_retryable_and_releases_lease():
     job = dict(user="owner", token="lease", generation=2)
     store = SimpleNamespace(claim=AsyncMock(return_value=job), release=AsyncMock())
-    service = PersistedHydration(store, None, None)
+    service = PersistedHydration(store, None)
     service.build = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
     assert await service.run_one()
     store.release.assert_awaited_once_with(job, failed=True, terminal=False)
-
-
-async def test_store_read_rejects_edited_or_deleted_episode_without_relying_on_size():
-    from app.services.hydration_compiler import COMPILER_VERSION, digest
-
-    ep = dict(uuid="ep", source="message", valid_at="2026-10-30", content="original")
-    payload = dict(
-        compiler=COMPILER_VERSION,
-        stamp="stamp",
-        result=asdict(published()),
-        source_hashes={"ep": digest(ep)},
-    )
-    store = HydrationStore(None)
-    store.current = AsyncMock(return_value=payload)
-    store.stamp = AsyncMock(return_value="stamp")
-    store.rows = AsyncMock(return_value=[ep])
-    store.request = AsyncMock()
-    store.discard = AsyncMock()
-    assert await store.read("owner")
-    store.rows.return_value = [dict(ep, content="modified")]
-    assert await store.read("owner") is None
-    store.rows.return_value = []
-    assert await store.read("owner") is None
 
 
 async def test_new_revision_refreshes_existing_session_without_leaking_old_cache():
@@ -330,7 +221,6 @@ async def test_real_hydrate_router_returns_published_text_coverage_and_legacy_co
 
 
 async def test_ingest_notifies_after_summary_and_before_completed_job():
-    # Real ingestion service ordering, with only external Graphiti and queue mocked.
     from app.schemas.models import IngestRequest
     from app.services.ingestion import IngestionService
     from app.services.job_store import create_job, get_job, remove_job
@@ -369,3 +259,31 @@ async def test_ingest_notifies_after_summary_and_before_completed_job():
         assert get_job(request.jobId).status == "completed"
     finally:
         remove_job(request.jobId)
+
+
+async def test_unmeasured_archive_size_is_omitted_instead_of_resetting_convex_memory_stats(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        security, "get_settings", lambda: SimpleNamespace(synapse_api_secret="secret")
+    )
+    app = FastAPI()
+    app.include_router(router)
+    result = published()
+    result.graph_stats = GraphStats(10, 15, total_chars=None)
+    service = HydrationService(None)
+    service.persisted = SimpleNamespace(read=AsyncMock(return_value=result))
+    app.state.hydration_service = service
+    app.state.cache_manager = SimpleNamespace(
+        create_compilation_cache=AsyncMock(return_value=(None, "small"))
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/hydrate",
+            headers={"X-API-SECRET": "secret"},
+            json={"userId": "owner", "version": "v2"},
+        )
+    assert response.status_code == 200
+    assert response.json()["graphStats"] == {"entity_count": 10, "relationship_count": 15}

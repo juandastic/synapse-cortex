@@ -1,51 +1,54 @@
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services.hydration_compiler import HydrationCompiler, WorkPending
-from app.services.hydration_consolidation import consolidate
-from app.services.hydration_result import GraphStats, source_facts
-from app.services.hydration_store import GroupCache
+from app.services.hydration_compiler import HydrationCompiler
+from app.services.hydration_consolidation import apply_plan, organize
+from app.services.hydration_result import GraphStats
 
 
 def facts():
-    return [
-        dict(
-            id=f"f{i}",
-            fact_id=f"f{i}",
-            duplicate_ids=[],
-            quote=f"Leidy siente que aprender {field} solo tiene sentido si realiza un pregrado formal.",
-            source_uuid="leidy",
-            target_uuid=field,
-            date="2026-11-02T10:00:00Z",
-            valid_at=None,
-            invalid_at=None,
-            correction=False,
-            episode_ids=["ep"],
-            fact_section="Estudios",
-        )
-        for i, field in enumerate(["biología", "aeronáutica", "física"], 1)
-    ]
-
-
-def client(approved=True, text=None):
-    text = (
-        text
-        or "Leidy siente que aprender biología, aeronáutica y física solo tiene sentido si realiza un pregrado formal."
+    return HydrationCompiler(None).fact_candidates(
+        [
+            dict(
+                uuid=str(i),
+                fact=text,
+                source_uuid="user",
+                target_uuid=str(i),
+                valid_at="2026-01-01",
+                invalid_at=None,
+                date="2026-11-02",
+                episode_ids=["ep"],
+            )
+            for i, text in enumerate(
+                ["Le gusta el café por la mañana.", "Le gusta el té por la mañana."]
+            )
+        ]
     )
+
+
+def provider(records=None, reviews=None):
     return SimpleNamespace(
         generate_response=AsyncMock(
             side_effect=[
-                {"records": [{"text": text, "ids": ["F1", "F2", "F3"]}]},
                 {
-                    "reviews": [
+                    "groups": [{"title": "Preferencias", "ids": ["F1", "F2"]}],
+                    "records": records
+                    if records is not None
+                    else [
+                        {"text": "Le gustan el café y el té por la mañana.", "ids": ["F1", "F2"]}
+                    ],
+                },
+                {
+                    "reviews": reviews
+                    if reviews is not None
+                    else [
                         {
                             "record_index": 0,
-                            "complete": approved,
-                            "supported": approved,
-                            "reason": "",
+                            "complete": True,
+                            "supported": True,
+                            "reason": "Conserva ambos.",
                         }
                     ]
                 },
@@ -54,242 +57,251 @@ def client(approved=True, text=None):
     )
 
 
-async def test_verified_consolidation_covers_all_sources_and_preserves_programmatic_dates():
-    original = facts()
-    llm = client()
-    result = await consolidate(original, llm)
-    assert len(result) == 1 and len(source_facts(result[0])) == 3
+async def test_one_organization_and_one_review_cover_all_originals_with_dates():
+    llm = provider()
+    source = facts()
+    plan = await organize(source, llm)
+    assert llm.generate_response.await_count == 2
+    assert plan["records"][0]["ids"] == ["0", "1"]
+    records = apply_plan(source, plan)
     edges = [
-        {"uuid": f["id"], "fact": f["quote"], "valid_at": None, "invalid_at": None}
-        for f in original
+        dict(
+            uuid=f["id"],
+            fact=f["quote"],
+            source_uuid=f["source_uuid"],
+            target_uuid=f["target_uuid"],
+            valid_at=f["valid_at"],
+            invalid_at=f["invalid_at"],
+        )
+        for f in source
     ]
-    rendered, retained = HydrationCompiler(None).render(result, edges, GraphStats(4, 3))
-    assert set(rendered.metadata.included_edge_ids) == {"f1", "f2", "f3"}
-    assert "2026-11-02T10:00:00Z" in rendered.compilation_text
-    assert "biología, aeronáutica y física" in rendered.compilation_text
-    assert llm.generate_response.await_count == 2
+    result, _ = HydrationCompiler(None).render(records, edges, GraphStats(3, 2))
+    assert "café y el té" in result.compilation_text
+    assert set(result.metadata.included_edge_ids) == {"0", "1"}
+    assert result.metadata.included_episode_ids == ["ep"]
+    assert "2026-01-01" in result.compilation_text
+    assert [c.kwargs["prompt_name"] for c in llm.generate_response.await_args_list] == [
+        "hydration.organize",
+        "hydration.verify",
+    ]
 
 
-@pytest.mark.parametrize("issue", ["unsupported", "unknown_id", "duplicate_ids"])
-async def test_suspicious_proposals_keep_original_details_and_coverage(issue):
-    original = facts()
-    llm = client(approved=False)
-    proposal = {
-        "records": [
-            {
-                "text": "Leidy siente que aprender biología, aeronáutica y física solo tiene sentido si realiza un pregrado formal.",
-                "ids": ["F1", "F2", "F3"],
-            }
-        ]
-    }
-    if issue == "unknown_id":
-        proposal["records"][0]["ids"].append("foreign")
-    if issue == "duplicate_ids":
-        proposal["records"].append(proposal["records"][0])
-    llm.generate_response.side_effect = [
-        proposal,
-        {
-            "reviews": [
-                {
-                    "record_index": 0,
-                    "complete": issue != "unsupported",
-                    "supported": issue != "unsupported",
-                    "reason": "missing or unsupported content",
-                }
-            ]
-        },
-    ]
-    result = await consolidate(original, llm)
-    assert [f["quote"] for f in result] == [f["quote"] for f in original]
+@pytest.mark.parametrize("ids", [["F1", "fake"], ["F1", "F1"], ["F1"], []])
+async def test_invalid_proposal_ids_do_not_suppress_any_literal_or_trigger_review(ids):
+    llm = provider(records=[{"text": "rewrite", "ids": ids}])
+    source = facts()
+    plan = await organize(source, llm)
+    assert llm.generate_response.await_count == 1
+    assert [f["quote"] for f in apply_plan(source, plan)] == [f["quote"] for f in source]
 
 
 @pytest.mark.parametrize(
-    "difference", ["source_uuid", "date", "valid_at", "invalid_at", "correction"]
+    "difference",
+    [
+        {"source_uuid": "cousin"},
+        {"valid_at": "2025-01-01"},
+        {"invalid_at": "2027-01-01"},
+        {"date": "2026-11-03"},
+        {"correction": True},
+    ],
 )
-async def test_different_subjects_or_temporal_states_are_not_fused(difference):
-    original = facts()[:2]
-    original[1][difference] = True if difference == "correction" else "different"
-    llm = client()
-    assert await consolidate(original, llm) == original
-    llm.generate_response.assert_not_awaited()
-
-
-async def test_failed_verification_keeps_literals_and_cache_avoids_repeated_cost():
-    saved = {}
-    cache = SimpleNamespace(load=AsyncMock(side_effect=lambda key, **kwargs: saved.get(key)))
-
-    async def save(key, value, **kwargs):
-        saved[key] = value
-
-    cache.save = save
-    llm = client(False)
-    original = facts()
-    assert await consolidate(original, llm, cache) == original
-    assert await consolidate(original, llm, cache) == original
-    assert llm.generate_response.await_count == 2
-
-
-async def test_provider_failure_does_not_replace_memory_with_empty_or_approximate_text():
-    original = facts()
-    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=TimeoutError()))
-    assert await consolidate(original, llm) == original
-
-
-async def test_editing_any_source_changes_cache_key_and_rechecks_the_rewrite():
-    saved = {}
-    cache = SimpleNamespace(load=AsyncMock(side_effect=lambda key, **kwargs: saved.get(key)))
-
-    async def save(key, value, **kwargs):
-        saved[key] = value
-
-    cache.save = save
-    original = facts()
-    llm = client()
-    assert len(await consolidate(original, llm, cache)) == 1
-    changed = [dict(f) for f in original]
-    changed[0]["quote"] = changed[0]["quote"].replace("biología", "biología molecular")
-    llm.generate_response.side_effect = [{"records": []}]
-    assert await consolidate(changed, llm, cache) == changed
-    assert llm.generate_response.await_count == 3
-
-
-async def test_budget_falls_back_to_whole_original_facts_if_merged_record_does_not_fit():
-    original = facts()
-    merged = await consolidate(original, client())
-    assert len(merged) == 1
-    edges = [dict(uuid=f["id"], fact=f["quote"], valid_at=None, invalid_at=None) for f in original]
-    full, _ = HydrationCompiler(None).render(merged, edges, GraphStats(4, 3))
-    compiler = HydrationCompiler(None, char_budget=len(full.compilation_text) - 5)
-    result, retained = compiler.render(merged, edges, GraphStats(4, 3))
-    assert retained and len(result.compilation_text) <= compiler.char_budget
-    assert all(f["quote"] in result.compilation_text for f in retained)
-    assert set(result.metadata.included_edge_ids) == {f["fact_id"] for f in retained}
-
-
-async def test_changed_member_or_alias_cannot_remain_hidden_inside_verified_text():
-    original = facts()
-    original[0]["duplicate_ids"] = ["alias"]
-    merged = await consolidate(original, client())
-    edges = [dict(uuid=f["id"], fact=f["quote"], valid_at=None, invalid_at=None) for f in original]
-    edges.append({**edges[0], "uuid": "alias"})
-    compiler = HydrationCompiler(None)
-    result, _ = compiler.render(merged, edges, GraphStats(4, 4))
-    assert set(result.metadata.included_edge_ids) == {"f1", "f2", "f3", "alias"}
-    edges[-1]["fact"] = "Dato corregido"
-    result, _ = compiler.render(merged, edges, GraphStats(4, 4))
-    assert set(result.metadata.included_edge_ids) == {"f2", "f3"}
-    assert "biología" not in result.compilation_text
+async def test_different_subjects_and_temporal_scopes_stay_separate(difference):
+    source = facts()
+    source[1].update(difference)
+    llm = provider()
+    plan = await organize(source, llm)
+    assert (not plan["records"]) and (llm.generate_response.await_count == 1)
+    assert len(apply_plan(source, plan)) == 2
 
 
 @pytest.mark.parametrize(
-    "reviews", [[], [dict(record_index=0, complete=True, supported=True, reason="")] * 2]
+    "reviews",
+    [
+        [],
+        [{"record_index": 0, "complete": False, "supported": True, "reason": "Missing detail"}],
+        [{"record_index": 0, "complete": True, "supported": False, "reason": "Inference"}],
+        [{"record_index": 0, "complete": True, "supported": True, "reason": ""}] * 2,
+    ],
 )
-async def test_missing_or_duplicate_verdict_is_not_approval(reviews):
-    llm = client()
-    proposal = llm.generate_response.side_effect
-    first = next(proposal)
-    llm.generate_response.side_effect = [first, {"reviews": reviews}]
-    assert await consolidate(facts(), llm) == facts()
+async def test_absent_rejected_or_duplicate_verdict_keeps_originals(reviews):
+    source = facts()
+    plan = await organize(source, provider(reviews=reviews))
+    assert len(apply_plan(source, plan)) == 2
+    assert not plan["records"]
 
 
-async def test_grouping_and_consolidation_share_two_call_budget():
-    store = SimpleNamespace(rows=AsyncMock(return_value=[]))
-    cache = GroupCache(store, {"user": "owner"})
-    assert await cache.load("group") is None
-    with pytest.raises(WorkPending):
-        await consolidate(facts(), client(), cache)
-    assert cache.calls == 1
-    fresh = GroupCache(store, {"user": "owner"})
-    assert await fresh.load("consolidation", calls=2) is None
-    with pytest.raises(WorkPending):
-        await fresh.load("another")
+@pytest.mark.parametrize("failed_call", [1, 2])
+async def test_provider_failure_publishes_literals_with_literal_facts(failed_call):
+    llm = provider()
+    responses = list(llm.generate_response.side_effect)
+    responses[failed_call - 1] = RuntimeError("provider unavailable")
+    llm.generate_response.side_effect = responses
+    source = facts()
+    plan = await organize(source, llm)
+    assert llm.generate_response.await_count == failed_call
+    assert [f["quote"] for f in apply_plan(source, plan)] == [f["quote"] for f in source]
 
 
-async def test_provider_failure_is_cached_for_job_but_retried_after_new_ingestion():
-    saved = {}
-
-    async def load(key, *, retry_epoch, **kwargs):
-        record = saved.get(key)
-        return record[0] if record and record[1] in (None, retry_epoch) else None
-
-    async def save(key, value, *, retry_epoch=None):
-        saved[key] = (value, retry_epoch)
-
-    cache = SimpleNamespace(load=load, save=save)
-    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=TimeoutError()))
-    assert await consolidate(facts(), llm, cache, retry_epoch=1) == facts()
-    assert await consolidate(facts(), llm, cache, retry_epoch=1) == facts()
+async def test_no_proposals_or_missing_topics_keeps_every_fact_without_extra_call():
+    source = facts()
+    llm = provider(records=[])
+    llm.generate_response.side_effect = [{"groups": [], "records": []}]
+    plan = await organize(source, llm)
+    assert len(apply_plan(source, plan)) == 2
     assert llm.generate_response.await_count == 1
-    llm = client()
-    assert len(await consolidate(facts(), llm, cache, retry_epoch=2)) == 1
-    assert llm.generate_response.await_count == 2
-    assert len(await consolidate(facts(), llm, cache, retry_epoch=3)) == 1
-    assert llm.generate_response.await_count == 2
-
-
-async def test_consolidation_timeout_keeps_literal_memory(monkeypatch):
-    monkeypatch.setattr("app.services.hydration_result.LLM_TIMEOUT_SECONDS", 0.001)
-
-    async def delayed(*args, **kwargs):
-        await asyncio.sleep(10)
-
-    llm = SimpleNamespace(generate_response=AsyncMock(side_effect=delayed))
-    assert await consolidate(facts(), llm) == facts()
-    assert llm.generate_response.await_count == 1
-
-
-async def test_parallel_english_enumeration_keeps_language_and_all_items():
-    original = [
-        {**f, "quote": f"Leidy experiences a physical reaction when seeing {insect}."}
-        for f, insect in zip(facts(), ["bees", "ants"], strict=False)
-    ]
-    llm = client()
-    llm.generate_response.side_effect = [
-        {
-            "records": [
-                {
-                    "text": "Leidy experiences a physical reaction when seeing bees and ants.",
-                    "ids": ["F1", "F2"],
-                }
-            ]
-        },
-        {"reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]},
-    ]
-    result = await consolidate(original, llm)
-    assert len(result) == 1 and "bees and ants" in result[0]["quote"]
-    assert {f["id"] for f in source_facts(result[0])} == {"f1", "f2"}
-
-
-async def test_model_can_paraphrase_when_review_accepts_without_word_rules():
-    llm = client(
-        text="Para Leidy, un pregrado formal da sentido al aprendizaje de física, biología y aeronáutica."
+    assert all(
+        (
+            f["quote"] == original["quote"]
+            for f, original in zip(apply_plan(source, plan), source, strict=True)
+        )
     )
-    result = await consolidate(facts(), llm)
-    assert len(result) == 1
-    assert result[0]["quote"].startswith("Para Leidy")
-    assert {f["id"] for f in source_facts(result[0])} == {"f1", "f2", "f3"}
 
 
-async def test_empty_proposal_keeps_every_original_without_forcing_consolidation():
-    llm = SimpleNamespace(generate_response=AsyncMock(return_value={"records": []}))
-    assert await consolidate(facts(), llm) == facts()
-    assert llm.generate_response.await_count == 1
+async def test_model_can_paraphrase_without_linguistic_word_rules():
+    llm = provider(
+        records=[{"text": "Su rutina matutina incluye tomar café o té.", "ids": ["F1", "F2"]}]
+    )
+    plan = await organize(facts(), llm)
+    assert apply_plan(facts(), plan)[0]["quote"] == "Su rutina matutina incluye tomar café o té."
 
 
-async def test_partial_proposal_keeps_every_unmerged_original():
-    llm = client()
-    llm.generate_response.side_effect = [
-        {
-            "records": [
-                {
-                    "text": "Leidy valora estudiar biología y aeronáutica mediante un pregrado formal.",
-                    "ids": ["F1", "F2"],
-                }
-            ]
-        },
-        {"reviews": [{"record_index": 0, "complete": True, "supported": True, "reason": ""}]},
+async def test_partial_proposal_preserves_every_unmerged_fact():
+    source = facts() + [{**facts()[0], "id": "2", "fact_id": "2", "quote": "Tiene un gato."}]
+    plan = await organize(source, provider())
+    records = apply_plan(source, plan)
+    assert len(records) == 2 and records[-1]["quote"] == "Tiene un gato."
+
+
+async def test_changed_source_is_not_hidden_inside_verified_paraphrase():
+    source = facts()
+    plan = await organize(source, provider())
+    records = apply_plan(source, plan)
+    rows = [
+        dict(uuid=f["id"], fact=f["quote"], valid_at=f["valid_at"], invalid_at=None) for f in source
     ]
-    result = await consolidate(facts(), llm)
-    assert len(result) == 2
-    assert result[-1] == facts()[-1]
-    assert {f["id"] for record in result for f in source_facts(record)} == {"f1", "f2", "f3"}
+    rows[1]["fact"] = "Other detail"
+    result, _ = HydrationCompiler(None).render(records, rows, GraphStats(3, 2))
+    assert result.metadata.included_edge_ids == ["0"]
+    assert "café y el té" not in result.compilation_text
+
+
+async def test_merged_record_over_budget_falls_back_to_whole_sources():
+    source = facts()
+    llm = provider(records=[{"text": "x" * 3000, "ids": ["F1", "F2"]}])
+    plan = await organize(source, llm)
+    rows = [
+        dict(uuid=f["id"], fact=f["quote"], valid_at=f["valid_at"], invalid_at=None) for f in source
+    ]
+    result, _ = HydrationCompiler(None, char_budget=1300).render(
+        apply_plan(source, plan), rows, GraphStats(3, 2)
+    )
+    assert set(result.metadata.included_edge_ids) == {"0", "1"}
+    assert "café por la mañana." in result.compilation_text
+    assert len(result.compilation_text) <= 1300
+
+
+async def test_semantic_priority_places_older_personal_detail_before_connected_recent_noise():
+    compiler = HydrationCompiler(None, char_budget=1100)
+    rows = [
+        dict(
+            uuid="personal",
+            fact="Necesita apoyo para organizar las comidas.",
+            source_uuid="user",
+            target_uuid="routine",
+            priority=3,
+            date="2020-01-01",
+        ),
+        *[
+            dict(
+                uuid=f"noise{i}",
+                fact="Dato enciclopédico " + str(i) + " " + ("x" * 100),
+                source_uuid="user",
+                target_uuid=str(i),
+                priority=1,
+                date="2026-11-01",
+            )
+            for i in range(10)
+        ],
+    ]
+    source = compiler.fact_candidates(rows)
+    # Aliases follow canonical UUID order, independently of graph ranking.
+    aliases = {f["id"]: f"F{i}" for i, f in enumerate(sorted(source, key=lambda f: f["id"]), 1)}
+    llm = SimpleNamespace(
+        generate_response=AsyncMock(
+            return_value={
+                "groups": [],
+                "records": [],
+                "priority_ids": [aliases["personal"]],
+            }
+        )
+    )
+    plan = await organize(source, llm)
+    result, _ = compiler.render(apply_plan(source, plan), rows, GraphStats(12, 11))
+    assert result.metadata.included_edge_ids[0] == "personal"
+    assert "Necesita apoyo para organizar las comidas." in result.compilation_text
+    assert len(result.compilation_text) <= 1100
+    assert len(result.metadata.included_edge_ids) < len(rows)
+
+
+async def test_unknown_duplicate_and_missing_priority_ids_do_not_remove_literal_facts():
+    source = facts()
+    llm = SimpleNamespace(
+        generate_response=AsyncMock(
+            return_value={
+                "groups": [],
+                "records": [],
+                "priority_ids": ["fake", "F2", "F2"],
+            }
+        )
+    )
+    plan = await organize(source, llm)
+    assert plan["priority_ids"] == ["1"]
+    records = apply_plan(source, plan)
+    assert {r["id"] for r in records} == {"0", "1"}
+    assert next(r for r in records if r["id"] == "1")["semantic_rank"] == 0
+    assert next(r for r in records if r["id"] == "0")["semantic_rank"] == 0.25
+
+
+def test_merged_record_inherits_its_highest_priority_member():
+    source = facts()
+    records = apply_plan(
+        source,
+        {
+            "priority_ids": ["1", "0"],
+            "records": [{"ids": ["0", "1"], "text": "Le gustan el café y el té por la mañana."}],
+        },
+    )
+    assert len(records) == 1 and records[0]["semantic_rank"] == 0
+    assert {f["id"] for f in records[0]["source_facts"]} == {"0", "1"}
+
+
+def test_unranked_early_graph_fact_can_reach_core_when_budget_is_tight():
+    compiler = HydrationCompiler(None, char_budget=1100)
+    rows = [
+        dict(
+            uuid="early",
+            fact="Necesita ayuda práctica para preparar comidas.",
+            source_uuid="user",
+            target_uuid="routine",
+            priority=1,
+            date="2026-11-02",
+        )
+    ]
+    rows += [
+        dict(
+            uuid=f"ranked{i:02}",
+            fact="Detalle personal " + str(i) + " " + ("x" * 110),
+            source_uuid="user",
+            target_uuid=str(i),
+            priority=1,
+            date="2026-11-01",
+        )
+        for i in range(20)
+    ]
+    source = compiler.fact_candidates(rows)
+    plan = {"priority_ids": [f"ranked{i:02}" for i in range(20)]}
+    result, _ = compiler.render(apply_plan(source, plan), rows, GraphStats(22, 21))
+    assert len(result.compilation_text) <= 1100
+    assert "early" in result.metadata.included_edge_ids
+    assert len(result.metadata.included_edge_ids) < len(rows)
+    assert set(result.metadata.included_edge_ids) <= {f["id"] for f in source}

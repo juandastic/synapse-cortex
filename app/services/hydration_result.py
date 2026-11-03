@@ -23,7 +23,7 @@ class GraphStats:
 
     entity_count: int
     relationship_count: int
-    total_chars: int = 0
+    total_chars: int | None = 0
 
 
 @dataclass
