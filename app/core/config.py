@@ -6,6 +6,7 @@ from typing import Literal
 
 from google import genai
 from google.oauth2 import service_account
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,12 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     # Shared server credential for OpenRouter chat and graph processing.
     open_router_api_key: str = ""
+    # Direct OpenAI credential for voice dictation only. Never sent to clients.
+    open_ai_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        validation_alias=AliasChoices("OPEN_AI_API_KEY", "OPENAI_API_KEY", "open_ai_api_key"),
+    )
+    openai_transcription_model: str = "gpt-transcribe"
 
     # Explicit provider/roles. Vertex remains available as a configuration rollback.
     graphiti_provider: Literal["vertex", "openrouter"] = "vertex"

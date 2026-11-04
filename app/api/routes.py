@@ -13,6 +13,7 @@ from notion_client import AsyncClient as NotionAsyncClient
 from notion_client.client import ClientOptions
 from opentelemetry import trace
 
+from app.api.audio import router as audio_router
 from app.api.dependencies import (
     ApiKeyDep,
     CacheManagerDep,
@@ -100,6 +101,7 @@ async def _compilation_cache(user, result, manager, hydration):
 
 
 router = APIRouter()
+router.include_router(audio_router)
 
 
 def _to_metadata_response(
