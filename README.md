@@ -1,5 +1,31 @@
 # Synapse Cortex
 
+## Voice dictation
+
+`POST /v1/audio/transcriptions` accepts a raw audio request body authenticated by
+the existing `X-API-SECRET` service header. Convex authenticates the end user and
+enforces the per-user allowance before invoking this endpoint. Cortex rejects
+empty recordings, unsupported MIME types, and bodies over 10 MB, including
+chunked uploads. Accepted formats include WebM, MP4/M4A, WAV and MP3. The original
+audio is forwarded as a multipart file to OpenAI `/v1/audio/transcriptions` and
+the only response is `{ "text": "..." }`. The endpoint does not persist audio or
+ingest text into memory, and it does not initialize or invoke graph services.
+
+Set `OPEN_AI_API_KEY` in the server `.env`; the standard `OPENAI_API_KEY` name
+is also accepted. The default `OPENAI_TRANSCRIPTION_MODEL` is `gpt-transcribe`.
+Docker Compose forwards these settings to the API container. Missing keys or
+provider availability errors fail the transcription without affecting chat.
+Provider response bodies and credentials are not returned to clients.
+
+For local testing, point an isolated local Convex deployment's
+`SYNAPSE_CORTEX_API_BASE_URL` at this API and match its
+`SYNAPSE_CORTEX_API_SECRET` to this server's `SYNAPSE_API_SECRET`. Keep the OpenAI
+key exclusively on Cortex. Starting the full application uses all configured
+graph services, so use local Neo4j settings when running the full lifespan.
+
+`make verify` covers the real HTTP route and provider transport with network
+boundaries mocked. No OpenAI key is needed for the test suite.
+
 See [TESTING.md](./TESTING.md) for test setup, protected behaviors and remaining gaps.
 
 **Cognitive backend for the Synapse AI Chat application**. A stateless REST API that processes conversational data into a dynamic knowledge graph, enabling personalized long-term memory and intelligent context retrieval for AI assistants.
