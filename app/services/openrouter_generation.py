@@ -13,6 +13,7 @@ from opentelemetry import trace
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import capture_generation
 from app.schemas.models import ChatCompletionRequest
+from app.services.prompt_context import assemble_system_context
 
 logger = logging.getLogger(__name__)
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -66,14 +67,16 @@ class OpenRouterGenerationService:
     def build_payload(self, request: ChatCompletionRequest) -> dict:
         self.validate_request(request)
         # Memory compilation is always sent as text; Gemini cache IDs never leave Cortex.
-        system_parts = [request.system_instruction or "", request.compilation or ""]
+        system_parts = [request.system_instruction or ""]
         system_parts.extend(
             message.content
             for message in request.messages
             if message.role == "system" and isinstance(message.content, str)
         )
         messages = []
-        system_text = "\n\n".join(part for part in system_parts if part)
+        system_text = assemble_system_context(
+            "\n\n".join(part for part in system_parts if part), request.compilation
+        )
         if system_text:
             messages.append({"role": "system", "content": system_text})
         messages.extend(

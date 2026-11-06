@@ -922,8 +922,22 @@ Pipeline steps reported via `currentStep`: `"scanning"` → `"applying"` → `"d
 Gemini 4 Argon (`gemini-4-argon`) chat uses `google-genai>=2.30.1`.
 Existing Gemini 3.1 assignments continue to send `gemini-3.1-pro-preview`.
 Argon does not support explicit `cached_content`: Cortex skips its cache creation
-and sends compiled memory inline in the existing prompt format. The explicit-cache
-lifecycle below applies to older models. Requests omitting a model still use Flash.
+and sends compiled memory inline. `CHAT_MODEL` selects the explicit-cache model
+and defaults to `gemini-3.1-pro-preview`, preserving existing user assignments.
+Hydration and background compilation do not create provider caches. A chat
+targeting the configured legacy Gemini model prepares its cache on demand,
+with a ten-second preparation timeout and inline fallback on failure. Argon
+and OpenRouter never trigger this preparation. This setting does not change
+users' chat assignments. The explicit-cache lifecycle below applies
+to older models. Requests omitting a model still use Flash.
+
+Both Gemini and OpenRouter place stable persona instructions and core memory
+before the current clock and retrieved context, preserving a reusable prompt prefix.
+The persisted core uses day-level dates and no repeated source label per record;
+source timestamps remain unchanged, and intraday validity intervals retain their times.
+The compiler still uses its 120,000-character budget and character-based token estimate.
+Optional graph retrieval has a three-second deadline. On timeout it is cancelled and
+generation continues with the existing core memory.
 
 ### Overview
 

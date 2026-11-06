@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import time
 
 from app.core.posthog import posthog_user_context
 from app.services.hydration_compiler import (
@@ -19,10 +18,9 @@ class UnsupportedArchive(ValueError):
 
 
 class PersistedHydration:
-    def __init__(self, store, compiler: HydrationCompiler, cache_manager=None):
+    def __init__(self, store, compiler: HydrationCompiler):
         self.store = store
         self.compiler = compiler
-        self.cache_manager = cache_manager
         self._wake = asyncio.Event()
         self._task = None
 
@@ -90,9 +88,8 @@ class PersistedHydration:
         dependencies = {
             e["uuid"]: fact_hash(e) for e in edges if e["uuid"] in result.metadata.included_edge_ids
         }
-        await self._prepare_provider_cache(user, result)
-        # No archive scan: validate only facts actually rendered, after the
-        # provider-cache await and immediately before the fenced publication.
+        # No archive scan: validate only facts actually rendered immediately
+        # before the fenced publication. Provider caches are prepared by chat.
         if not await self.store.validate(user, dependencies) or await self.store.head(user) != head:
             return False
         logger.info(
@@ -106,22 +103,6 @@ class PersistedHydration:
             dependencies=dependencies,
             head=head,
         )
-
-    async def _prepare_provider_cache(self, user, result):
-        if not self.cache_manager or not result.compilation_text:
-            return
-        try:
-            name, _ = await asyncio.wait_for(
-                self.cache_manager.create_compilation_cache(user, result.compilation_text),
-                timeout=10,
-            )
-            result.provider_cache_name = name
-            result.provider_cache_model = self.cache_manager.model_name
-            result.provider_cache_expires_at = (
-                time.time() + self.cache_manager.ttl_seconds if name else 0
-            )
-        except Exception:
-            logger.warning("Provider cache preparation failed; publication can be sent inline")
 
     async def run_one(self, user=None):
         job = await self.store.claim(user=user) if user else await self.store.claim()

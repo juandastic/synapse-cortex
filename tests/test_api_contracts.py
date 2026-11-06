@@ -80,7 +80,8 @@ async def test_completed_poll_returns_memory_cache_and_metadata_then_removes_job
     body = response.json()
     assert body["status"] == "completed"
     assert body["userKnowledgeCompilation"] == "User lives in Bogota"
-    assert body["cacheName"] == "cachedContents/test"
+    assert body["cacheName"] is None
+    services.cache_manager.create_compilation_cache.assert_not_awaited()
     assert body["compilationMetadata"]["included_node_ids"] == ["node"]
     assert body["graphStats"]["relationship_count"] == 2
     assert body["metadata"]["model"] == "test-model"
@@ -101,17 +102,10 @@ async def test_failed_poll_returns_retry_information_and_cleans_job(api_client, 
     assert get_job(job_id) is None
 
 
-@pytest.mark.parametrize("service", ["hydration", "cache"])
-async def test_poll_failure_preserves_completed_job_so_client_can_retry(
-    api_client, job_id, service
-):
+async def test_poll_failure_preserves_completed_job_so_client_can_retry(api_client, job_id):
     client, services = api_client
     complete_job(job_id)
-    method = (
-        services.hydration_service.build_user_knowledge
-        if service == "hydration"
-        else services.cache_manager.create_compilation_cache
-    )
+    method = services.hydration_service.build_user_knowledge
     method.side_effect = RuntimeError("temporarily unavailable")
     assert (
         await client.get(f"/ingest/status/{job_id}", headers={"X-API-SECRET": "test-secret"})

@@ -10,6 +10,7 @@ Retrieval leaves input messages unchanged. Orchestration updates the request
 with the retrieved context.
 """
 
+import asyncio
 import html
 import logging
 import re
@@ -27,16 +28,12 @@ from graphiti_core.search.search_config_recipes import (
 
 from app.core.posthog import capture_span, new_trace_id, posthog_user_context
 from app.schemas.models import ChatCompletionRequest, ChatMessage
+from app.services.prompt_context import RAG_HEADER as _RAG_HEADER
 
 logger = logging.getLogger(__name__)
 
 _QUERY_TAIL_MESSAGES = 3
-_RAG_HEADER = (
-    "\n\n### RELEVANT EPISODIC MEMORY FOR THIS TURN ###\n"
-    "(The following facts and entities were retrieved from the user's "
-    "graph memory based on the current conversation context. "
-    "Use them if relevant.)\n\n"
-)
+RAG_TIMEOUT_SECONDS = 3.0
 
 EDGE_AND_NODE_HYBRID_SEARCH_RRF = SearchConfig(
     edge_config=EDGE_HYBRID_SEARCH_RRF.edge_config,
@@ -331,14 +328,15 @@ async def maybe_run_graph_rag(
     assert request.compilationMetadata is not None
 
     try:
-        rag_result = await retrieve_graph_rag_context(
-            graphiti=graphiti,
-            messages=request.messages,
-            user_id=request.user_id,
-            included_edge_ids=set(request.compilationMetadata.included_edge_ids),
-            included_node_ids=set(request.compilationMetadata.included_node_ids),
-            posthog_trace_id=request.posthog_trace_id,
-        )
+        async with asyncio.timeout(RAG_TIMEOUT_SECONDS):
+            rag_result = await retrieve_graph_rag_context(
+                graphiti=graphiti,
+                messages=request.messages,
+                user_id=request.user_id,
+                included_edge_ids=set(request.compilationMetadata.included_edge_ids),
+                included_node_ids=set(request.compilationMetadata.included_node_ids),
+                posthog_trace_id=request.posthog_trace_id,
+            )
         if rag_result.has_context:
             augmented = _RAG_HEADER + rag_result.context_block
             # New-shape clients send system_instruction as a separate field;
@@ -353,6 +351,9 @@ async def maybe_run_graph_rag(
                     rag_result.context_block,
                 )
         return GraphRagOutcome(enabled=True, result=rag_result)
+    except TimeoutError:
+        logger.warning("GraphRAG exceeded %.1fs; proceeding with core memory", RAG_TIMEOUT_SECONDS)
+        return GraphRagOutcome(enabled=False, skip_reason="timeout")
     except Exception:
         logger.exception("GraphRAG context retrieval failed, proceeding without it")
         return GraphRagOutcome(enabled=False, skip_reason="error")

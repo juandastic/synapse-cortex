@@ -142,6 +142,17 @@ class HydrationStore:
             expires=expires,
         )
 
+    async def provider_cache(self, user, revision):
+        rows = await self.rows(
+            """MATCH (n:SynapseUserCore {user_id:$user,hydration_revision:$revision})
+            WHERE n.hydration_result IS NOT NULL
+            RETURN n.hydration_cache_name AS name,n.hydration_cache_model AS model,
+                n.hydration_cache_expires_at AS expires""",
+            user=user,
+            revision=revision,
+        )
+        return rows[0] if rows else None
+
     async def read(self, user):
         payload = await self.current(user)
         if payload is None or payload["compiler"] != COMPILER_VERSION:

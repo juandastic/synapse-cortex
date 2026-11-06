@@ -110,7 +110,7 @@ async def test_empty_user_can_publish_empty_profile_without_model_call():
     llm.generate_response.assert_not_awaited()
 
 
-async def test_cache_failure_does_not_block_publication_and_dependency_check_is_after_cache():
+async def test_build_validates_dependencies_and_publishes_without_provider_cache_work():
     service, store, _ = setup()
     order = []
 
@@ -125,7 +125,9 @@ async def test_cache_failure_does_not_block_publication_and_dependency_check_is_
     service.cache_manager = SimpleNamespace(create_compilation_cache=cache)
     store.validate.side_effect = validate
     assert await service.build(dict(user="owner"))
-    assert order == ["cache", "validate"]
+    assert order == ["validate"]
+    result = store.publish.await_args.args[1]
+    assert result.provider_cache_name is None
 
 
 async def test_publish_contains_only_result_and_dependencies_and_is_fenced():

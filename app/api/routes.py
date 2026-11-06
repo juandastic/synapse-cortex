@@ -2,6 +2,7 @@
 API Routes - Endpoint definitions for Synapse Cortex.
 """
 
+import asyncio
 import logging
 import time
 import uuid
@@ -63,7 +64,7 @@ from app.services.graph_rag import (
     rag_outcome_to_span_attrs,
     rag_outcome_to_usage_fields,
 )
-from app.services.hydration_result import CompilationMetadata, GraphStats
+from app.services.hydration_result import CompilationMetadata, GraphStats, HydrationResult
 from app.services.job_store import get_job, remove_job
 from app.services.notion_correction_job_store import (
     create_notion_correction_job,
@@ -78,18 +79,27 @@ from app.services.notion_export_job_store import (
 )
 
 logger = logging.getLogger(__name__)
+CACHE_PREPARATION_TIMEOUT_SECONDS = 10
 
 
-async def _compilation_cache(user, result, manager, hydration):
+async def _compilation_cache(user, result, manager, hydration, *, create=False):
+    persisted = getattr(hydration, "persisted", None)
+    revision = getattr(result.metadata, "compilation_revision", None)
+    if create and persisted and revision and not result.provider_cache_name:
+        cached = await persisted.store.provider_cache(user, revision)
+        if cached:
+            result.provider_cache_name = cached["name"]
+            result.provider_cache_model = cached["model"]
+            result.provider_cache_expires_at = cached["expires"] or 0
     if (
         result.provider_cache_name
         and result.provider_cache_expires_at > time.time() + 30
         and result.provider_cache_model == getattr(manager, "model_name", None)
     ):
         return result.provider_cache_name, ""
+    if not create:
+        return None, "deferred_until_chat"
     name, reason = await manager.create_compilation_cache(user, result.compilation_text)
-    persisted = getattr(hydration, "persisted", None)
-    revision = getattr(result.metadata, "compilation_revision", None)
     if name and persisted and revision:
         try:
             await persisted.store.set_cache(
@@ -98,6 +108,32 @@ async def _compilation_cache(user, result, manager, hydration):
         except Exception:
             logger.warning("Could not save provider cache association; text remains available")
     return name, reason
+
+
+async def _prepare_chat_cache(request, manager, hydration):
+    """Only a chat targeting the configured legacy Gemini model needs an explicit cache."""
+    if (
+        request.provider != "vertex"
+        or request.model == "gemini-4-argon"
+        or request.model != getattr(manager, "model_name", None)
+        or request.cache_name
+        or not request.user_id
+        or not request.compilation
+    ):
+        return
+    result = HydrationResult(
+        request.compilation,
+        CompilationMetadata(**request.compilationMetadata.model_dump())
+        if request.compilationMetadata
+        else None,
+    )
+    try:
+        request.cache_name, _ = await asyncio.wait_for(
+            _compilation_cache(request.user_id, result, manager, hydration, create=True),
+            timeout=CACHE_PREPARATION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        logger.warning("Chat cache preparation unavailable; sending memory inline")
 
 
 router = APIRouter()
@@ -452,6 +488,7 @@ async def chat_completions(
         # This is request-local. The stored Gemini cache stays available for later turns.
         request.cache_name = None
     await hydration_service.refresh_chat_compilation(request)
+    await _prepare_chat_cache(request, cache_manager, hydration_service)
     span = trace.get_current_span()
     system_prompt_chars = 0
     has_images = False

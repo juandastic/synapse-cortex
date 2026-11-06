@@ -33,6 +33,7 @@ from app.schemas.models import (
     UsageData,
 )
 from app.services.cache_manager import CacheManager
+from app.services.prompt_context import assemble_system_context
 
 logger = logging.getLogger(__name__)
 
@@ -658,12 +659,12 @@ class GenerationService:
                     system_prompt = msg.content
                     break
 
-        effective_system = system_prompt or ""
-        if inline_compilation and compilation:
-            effective_system = (
-                f"{effective_system}\n\n{compilation}" if effective_system else compilation
+        effective_system = (
+            assemble_system_context(
+                system_prompt or "", compilation if inline_compilation else None
             )
-        effective_system = effective_system or None
+            or None
+        )
 
         gemini_contents: list[types.Content] = []
         pending_system = effective_system
