@@ -1,4 +1,4 @@
-# Consultative second opinion (v1)
+# Consultative second opinion
 
 The selected author remains responsible for the answer. An OpenAI colleague offers
 optional corrections, relevant risks/benefits and supporting/contradicting evidence.
@@ -70,6 +70,14 @@ upstream charges when reported. `known_cost_usd` is a lower bound; `cost_complet
 on failure or unknown-stage costs. Vertex currently has no returned dollar estimate.
 Published grounding/cache metadata belongs only to the published author; colleague
 sources remain in internal traces with provider-annotation vs model-link provenance.
+
+Prompt policy `v2` keeps research references internal unless the user explicitly asks
+to see sources; requesting a search alone does not request a bibliography. The colleague
+and final author focus on useful explanations and distinguish supported mechanisms from
+plausible individual hypotheses. Missing context calls for a focused question, after
+checking history/memory, rather than a generic precaution. Corrections stay brief and
+in context. Explicit immediate dangers still receive relevant action; ordinary follow-ups
+do not repeat warnings or introduce hypothetical emergency checklists.
 
 The integration needs no chat frontend, Convex schema or product analytics changes.
 Search by the shared trace/session/user identity in PostHog LLM Analytics and by

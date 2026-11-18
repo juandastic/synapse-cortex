@@ -205,7 +205,7 @@ async def test_advisor_keeps_complete_context_images_and_persona_only_as_quoted_
     assert result.search_used
     assert result.usage["completion_tokens_details"]["reasoning_tokens"] == 70
     assert events[0]["properties"]["$ai_total_cost_usd"] == 0.02
-    assert events[0]["properties"]["consultation_policy_version"] == "v1"
+    assert events[0]["properties"]["consultation_policy_version"] == "v2"
 
 
 async def test_search_can_be_disabled_without_silent_retry():
