@@ -28,6 +28,8 @@ boundaries mocked. No OpenAI key is needed for the test suite.
 
 See [TESTING.md](./TESTING.md) for test setup, protected behaviors and remaining gaps.
 
+See [consultative second opinion](./docs/consultation.md) for the optional medical/physiological enrichment flow, configuration and tracing.
+
 **Cognitive backend for the Synapse AI Chat application**. A stateless REST API that processes conversational data into a dynamic knowledge graph, enabling personalized long-term memory and intelligent context retrieval for AI assistants.
 
 ## Graph processing provider

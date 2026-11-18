@@ -18,6 +18,7 @@ from app.api.audio import router as audio_router
 from app.api.dependencies import (
     ApiKeyDep,
     CacheManagerDep,
+    ConsultativeGenerationServiceDep,
     GenerationServiceDep,
     GraphitiDep,
     GraphServiceDep,
@@ -469,6 +470,7 @@ async def chat_completions(
     graphiti: GraphitiDep,
     cache_manager: CacheManagerDep,
     hydration_service: HydrationServiceDep,
+    consultative_generation_service: ConsultativeGenerationServiceDep = None,
 ):
     """
     OpenAI-compatible chat completions endpoint with streaming.
@@ -540,17 +542,20 @@ async def chat_completions(
 
     # --- PostHog trace: emit early so RAG span and generation group under it ---
     request.posthog_trace_id = new_trace_id()
-    capture_trace(
-        request.user_id or "anonymous",
-        request.posthog_trace_id,
-        name="chat_completion",
-        session_id=request.session_id,
-        properties={
-            "cache_enabled": request.cache_name is not None,
-            "cache_skip_reason": cache_skip_reason,
-            "cache_compilation_size_chars": len(request.compilation or ""),
-        },
-    )
+    try:
+        capture_trace(
+            request.user_id or "anonymous",
+            request.posthog_trace_id,
+            name="chat_completion",
+            session_id=request.session_id,
+            properties={
+                "cache_enabled": request.cache_name is not None,
+                "cache_skip_reason": cache_skip_reason,
+                "cache_compilation_size_chars": len(request.compilation or ""),
+            },
+        )
+    except Exception:
+        logger.warning("chat.trace_capture_failed trace_id=%s", request.posthog_trace_id)
 
     # --- GraphRAG Context Retrieval ---
     rag_outcome = await maybe_run_graph_rag(request, graphiti)
@@ -572,10 +577,16 @@ async def chat_completions(
         },
     )
     mark_span_success(span)
+    if consultative_generation_service is not None:
+        stream = consultative_generation_service.stream_chat_completion(
+            request, cache_manager=cache_manager
+        )
+    elif request.provider == "openrouter":
+        stream = openrouter_generation_service.stream_chat_completion(request)
+    else:
+        stream = generation_service.stream_chat_completion(request, cache_manager=cache_manager)
     return StreamingResponse(
-        openrouter_generation_service.stream_chat_completion(request)
-        if request.provider == "openrouter"
-        else generation_service.stream_chat_completion(request, cache_manager=cache_manager),
+        stream,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

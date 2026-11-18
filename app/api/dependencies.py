@@ -9,6 +9,7 @@ from graphiti_core import Graphiti
 
 from app.core.security import verify_api_key
 from app.services.cache_manager import CacheManager
+from app.services.consultative_generation import ConsultativeGenerationService
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
@@ -38,6 +39,11 @@ def get_generation_service(request: Request) -> GenerationService:
 
 def get_openrouter_generation_service(request: Request) -> OpenRouterGenerationService:
     return request.app.state.openrouter_generation_service
+
+
+def get_consultative_generation_service(request: Request) -> ConsultativeGenerationService | None:
+    # Old ASGI integrations without a lifespan retain the original path.
+    return getattr(request.app.state, "consultative_generation_service", None)
 
 
 def get_graph_service(request: Request) -> GraphService:
@@ -71,6 +77,9 @@ IngestionServiceDep = Annotated[IngestionService, Depends(get_ingestion_service)
 GenerationServiceDep = Annotated[GenerationService, Depends(get_generation_service)]
 OpenRouterGenerationServiceDep = Annotated[
     OpenRouterGenerationService, Depends(get_openrouter_generation_service)
+]
+ConsultativeGenerationServiceDep = Annotated[
+    ConsultativeGenerationService | None, Depends(get_consultative_generation_service)
 ]
 GraphServiceDep = Annotated[GraphService, Depends(get_graph_service)]
 GraphitiDep = Annotated[Graphiti, Depends(get_graphiti)]

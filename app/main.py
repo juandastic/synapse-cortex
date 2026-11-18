@@ -24,12 +24,14 @@ from app.core.graphiti_llm import OpenRouterGraphitiClient
 from app.core.posthog import get_posthog, init_posthog, shutdown_posthog
 from app.core.telemetry import setup_telemetry, shutdown_telemetry
 from app.services.cache_manager import CacheManager
+from app.services.consultative_generation import ConsultativeGenerationService
 from app.services.generation import GenerationService
 from app.services.graph import GraphService
 from app.services.hydration import HydrationService
 from app.services.hydration_compiler import HydrationCompiler
 from app.services.hydration_store import HydrationStore
 from app.services.ingestion import IngestionService
+from app.services.medical_consultant import MedicalConsultantClient
 from app.services.notion_correction import NotionCorrectionService
 from app.services.notion_export import NotionExportService
 from app.services.openrouter_generation import OpenRouterGenerationService
@@ -158,6 +160,29 @@ async def lifespan(app: FastAPI):
     app.state.openrouter_generation_service = OpenRouterGenerationService(
         settings.open_router_api_key
     )
+    app.state.medical_consultant = MedicalConsultantClient(
+        settings.open_router_api_key,
+        decision_model=settings.consultation_decision_model,
+        model=settings.consultation_model,
+        reasoning_effort=settings.consultation_reasoning_effort,
+        timeout_seconds=settings.consultation_timeout_seconds,
+        routing_timeout_seconds=settings.consultation_routing_timeout_seconds,
+        search_enabled=settings.consultation_search_enabled,
+    )
+    app.state.consultative_generation_service = ConsultativeGenerationService(
+        app.state.medical_consultant,
+        generation_service,
+        app.state.openrouter_generation_service,
+        enabled=settings.consultation_enabled,
+    )
+    logger.info(
+        "Consultation configured: enabled=%s decision_model=%s model=%s reasoning=%s search=%s",
+        settings.consultation_enabled,
+        settings.consultation_decision_model,
+        settings.consultation_model,
+        settings.consultation_reasoning_effort,
+        settings.consultation_search_enabled,
+    )
     app.state.graph_service = graph_service
     app.state.notion_export_service = notion_export_service
     app.state.notion_correction_service = notion_correction_service
@@ -171,6 +196,7 @@ async def lifespan(app: FastAPI):
     await app.state.openrouter_generation_service.close()
     await persisted.close()
     await hydration_llm.close()
+    await app.state.medical_consultant.close()
     await neo4j_driver.close()
     await graphiti.close()
     if isinstance(graphiti.llm_client, OpenRouterGraphitiClient):

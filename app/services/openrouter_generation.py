@@ -246,6 +246,7 @@ class OpenRouterGenerationService:
             **openrouter_usage_properties(usage),
             "requested_model": request.model,
             "finish_reason": finish_reason,
+            "consultation_stage": request.generation_stage,
             **request.rag_usage_fields,
         }
         try:

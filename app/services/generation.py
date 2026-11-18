@@ -197,6 +197,7 @@ class GenerationService:
                         request.user_id,
                         trace_id=request.posthog_trace_id,
                         session_id=request.session_id,
+                        generation_stage=request.generation_stage,
                         cache_name=cache_name_to_use,
                     )
                     iterator = s.__aiter__()
@@ -525,6 +526,7 @@ class GenerationService:
         user_id: str | None,
         trace_id: str = "",
         session_id: str | None = None,
+        generation_stage: str = "response",
         cache_name: str | None = None,
     ):
         """Route streaming through PostHog wrapper (auto-tracked) or raw client.
@@ -546,6 +548,7 @@ class GenerationService:
             if session_id:
                 posthog_props["$ai_session_id"] = session_id
             posthog_props["grounding_enabled"] = self._grounding_enabled
+            posthog_props["consultation_stage"] = generation_stage
             kwargs: dict = {
                 "model": model,
                 "contents": contents,
