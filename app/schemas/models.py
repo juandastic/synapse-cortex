@@ -181,6 +181,7 @@ class ChatCompletionRequest(BaseModel):
     )
     rag_usage_fields: dict[str, object] = Field(default_factory=dict, exclude=True)
     posthog_trace_id: str = Field(default="", exclude=True)
+    generation_stage: str = Field(default="response", exclude=True)
     # Server-side mutable state used by generation. Not part of the public API.
     cache_fallback_triggered: bool = Field(default=False, exclude=True)
     cache_fallback_error: str = Field(default="", exclude=True)

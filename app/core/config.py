@@ -54,6 +54,15 @@ class Settings(BaseSettings):
     # whether a search is useful for each individual request.
     grounding_enabled: bool = True
 
+    # Optional second opinion. Disabled until explicitly enabled for a deployment.
+    consultation_enabled: bool = False
+    consultation_decision_model: str = "openai/gpt-6-luna-decisions"
+    consultation_model: str = "openai/gpt-6.1-sol"
+    consultation_reasoning_effort: Literal["low", "medium", "high"] = "medium"
+    consultation_timeout_seconds: float = 60
+    consultation_routing_timeout_seconds: float = 4
+    consultation_search_enabled: bool = True
+
     # API Security
     synapse_api_secret: str
 
