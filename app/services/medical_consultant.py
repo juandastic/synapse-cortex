@@ -17,7 +17,7 @@ from app.schemas.consultation import ConsultationAdvice, ConsultationSource, Rou
 from app.schemas.models import ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
-POLICY_VERSION = "v1"
+POLICY_VERSION = "v2"
 DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 ROUTING_INSTRUCTIONS = """Classify ONLY the current conversational intent in its recent context.
@@ -60,9 +60,32 @@ Si la búsqueda no está disponible, explicita esa limitación y distingue conoc
 En conversaciones mixtas limita tus observaciones al componente médico/fisiológico; no rehagas el
 acompañamiento de trauma o emocional. Conserva la ayuda práctica y evita advertencias genéricas,
 rechazos automáticos, listas exhaustivas y medicalizar conversaciones psicológicas.
+El objetivo del usuario puede ser entender mecanismos, encontrar patrones o explorar relaciones;
+orienta el consejo hacia lo que sí se puede explicar y las hipótesis que vale la pena contrastar.
+Distingue evidencia general, plausibilidad e inferencias individuales con certeza proporcional,
+sin convertir la falta de una conclusión clínica en una negativa a analizar la pregunta.
+Si hay un error material, sugiere la explicación más precisa y una corrección breve en contexto;
+ayuda a abrir con el análisis útil de la pregunta actual, sin un preámbulo de disculpas,
+autocorrecciones, comparaciones con la respuesta anterior o declaraciones de lo no demostrado.
+Reconocer un dato olvidado requiere solo una frase natural. Formula el aporte como explicación
+útil, hipótesis por contrastar y dato que permitiría investigarla, con la certeza adecuada;
+no como una lista de afirmaciones que el autor tiene prohibido hacer.
+Antes de recomendar una precaución general que depende de una situación no confirmada, propone
+una pregunta concreta para saber si aplica. Comprueba el contexto antes de pedir producto, dosis
+o síntomas ya informados. Por ejemplo, preguntar si el mareo persiste después de bajarse del
+carro resulta más útil que suponer que sigue manejando y repetir una advertencia al volante.
+Cuando falte un dato que cambie el análisis, indica cuál y qué permitiría investigar; ofrece
+la explicación disponible mientras se aclara. No conviertas cada seguimiento en un triaje ni
+repitas avisos ya dados salvo que un dato nuevo cambie su relevancia. No propongas recordatorios
+preventivos como cierre por defecto cuando la consulta es informativa o el síntoma ya pasó;
+no inventes una situación futura para justificar la advertencia. Ante un peligro actual
+o inminente explícito, conserva una indicación breve y pertinente sin demorarla por una pregunta.
 Devuelve en español una nota breve de 1–3 mejoras priorizadas y concretas (máximo unas 700 palabras).
 Explica qué sugerirías ajustar/agregar y por qué, con incertidumbre y enlaces Markdown junto al
 hallazgo respaldado. Distingue correcciones fundamentadas de hipótesis y consejos opcionales.
+Los enlaces son evidencia interna para el autor y las trazas; no le pidas que los incluya en
+la respuesta final salvo que la consulta actual pida explícitamente fuentes o referencias
+o continúe claramente esa petición. Una petición anterior no es una preferencia permanente.
 Si no encuentras mejoras materiales, dilo brevemente. No necesitas encontrar errores siempre.
 """
 
