@@ -23,8 +23,7 @@ Routing and advice have hard deadlines. Failure replays the original author answ
 A final failure before any text also replays the draft. After final text is published,
 interruption terminates that response with an error, without appending the draft.
 Cancellation closes upstream generators; SSE comment heartbeats keep quiet stages alive.
-No new product UI is required. Frontend local HTTP actions can be configured through
-`VITE_CONVEX_SITE_URL`; cloud deployments keep deriving the site URL from cloud URL.
+No new product UI is required.
 
 ## Configuration
 

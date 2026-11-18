@@ -17,6 +17,7 @@ from opentelemetry import trace
 from app.core.openrouter_usage import openrouter_usage_properties
 from app.core.posthog import capture_span
 from app.schemas.models import ChatMessage
+from app.services.prompt_context import RAG_HEADER
 
 logger = logging.getLogger(__name__)
 POLICY_VERSION = "v1"
@@ -240,10 +241,9 @@ class ConsultativeGenerationService:
         try:
             try:
                 with trace.get_tracer(__name__).start_as_current_span("consultation.routing"):
-                    decision = await asyncio.wait_for(
-                        self.consultant.classify(request),
-                        timeout=self.consultant.routing_timeout_seconds,
-                    )
+                    # The client owns the hard deadline and records timeouts distinctly
+                    # from a user disconnect/cancellation.
+                    decision = await self.consultant.classify(request)
                 summary.update(
                     category=decision.category,
                     probability=decision.probability,
@@ -281,11 +281,8 @@ class ConsultativeGenerationService:
 
             try:
                 with trace.get_tracer(__name__).start_as_current_span("consultation.advice"):
-                    advice = await asyncio.wait_for(
-                        self.consultant.advise(
-                            request, draft.content, draft.usage.get("grounding_sources", [])
-                        ),
-                        timeout=self.consultant.timeout_seconds,
+                    advice = await self.consultant.advise(
+                        request, draft.content, draft.usage.get("grounding_sources", [])
                     )
             except Exception as error:
                 summary.update(status="advice_failed", error_type=type(error).__name__)
@@ -306,16 +303,23 @@ class ConsultativeGenerationService:
                 advice_ms=advice.duration_ms,
             )
             stages["advice"] = self._normalize_usage(advice.usage)
-            final_request = request.model_copy(deep=True)
+            final_request = draft_request.model_copy(deep=True)
             final_request.generation_stage = "final"
-            final_request.system_instruction = (
-                request.system_instruction
-                or "\n".join(
+            if final_request.cache_fallback_triggered:
+                # The draft already invalidated this cache; do not retry it in the final.
+                final_request.cache_name = None
+            if not final_request.system_instruction:
+                final_request.system_instruction = "\n".join(
                     message.content
-                    for message in request.messages
+                    for message in final_request.messages
                     if message.role == "system" and isinstance(message.content, str)
                 )
-            ) + FINAL_INSTRUCTION
+                final_request.messages = [
+                    message for message in final_request.messages if message.role != "system"
+                ]
+            # Keep trusted instructions outside the optional retrieved-memory section.
+            stable, separator, recalled = final_request.system_instruction.partition(RAG_HEADER)
+            final_request.system_instruction = stable + FINAL_INSTRUCTION + separator + recalled
             # Put reference data in a separate message, not in the trusted persona.
             final_request.messages.append(
                 ChatMessage(

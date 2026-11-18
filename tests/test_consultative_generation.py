@@ -15,8 +15,11 @@ from app.schemas.consultation import ConsultationAdvice, ConsultationSource, Rou
 from app.schemas.models import ChatCompletionChunk, ChatCompletionRequest, ChatMessage
 from app.services import consultative_generation
 from app.services.consultative_generation import ConsultativeGenerationService
+from app.services.generation import GenerationService
 from app.services.graph_rag import GraphRagOutcome
-from app.services.medical_consultant import ConsultationError
+from app.services.medical_consultant import ConsultationError, MedicalConsultantClient
+from app.services.openrouter_generation import OpenRouterGenerationService
+from app.services.prompt_context import RAG_HEADER
 
 DONE = "data: [DONE]\n\n"
 DRAFT = "PRIVATE draft: the supplement never causes headaches."
@@ -495,20 +498,11 @@ async def test_byok_upstream_cost_and_reasoning_tokens_are_recorded_internally(t
 
 
 @pytest.mark.parametrize("failure_stage", ["routing", "advice"])
-@pytest.mark.parametrize("failure_type", ["exception", "timeout"])
-async def test_consultant_errors_and_hard_timeouts_fail_open(
-    failure_stage, failure_type, telemetry
-):
+async def test_consultant_errors_fail_open(failure_stage, telemetry):
     advisor = consultant()
-    cancelled = asyncio.Event()
 
     async def unavailable(*args):
-        if failure_type == "exception":
-            raise RuntimeError("provider unavailable")
-        try:
-            await asyncio.Event().wait()
-        finally:
-            cancelled.set()
+        raise RuntimeError("provider unavailable")
 
     if failure_stage == "routing":
         advisor.classify.side_effect = unavailable
@@ -525,10 +519,53 @@ async def test_consultant_errors_and_hard_timeouts_fail_open(
     summary = internal_summary(telemetry)
     assert summary["status"] == f"{failure_stage}_failed"
     assert internal_tokens(summary) == (12 if failure_stage == "routing" else 16)
-    if failure_type == "timeout":
-        assert cancelled.is_set(), "Timeout must cancel the upstream consultation"
     if failure_stage == "routing":
         advisor.advise.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure_stage", ["routing", "advice"])
+async def test_real_consultant_deadline_fails_open_and_records_timeout(
+    failure_stage, telemetry, monkeypatch
+):
+    generation_capture = Mock()
+    monkeypatch.setattr("app.services.medical_consultant.capture_generation", generation_capture)
+    cancelled = asyncio.Event()
+
+    async def handle(req):
+        if failure_stage == "advice" and req.url.path.endswith("decisions"):
+            return httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "consultation_route": {
+                            "type": "choice",
+                            "choice": "medical",
+                            "probabilities": {"medical": 0.95},
+                        }
+                    },
+                    "usage": usage(3, 1, 0.001),
+                },
+            )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        advisor = MedicalConsultantClient(
+            "test-key", client=client, routing_timeout_seconds=0.01, timeout_seconds=0.01
+        )
+        events = await asyncio.wait_for(collect(pipeline(advisor), request()), 1)
+    assert cancelled.is_set()
+    assert visible_text(events) == (FINAL if failure_stage == "routing" else DRAFT)
+    assert events.count(DONE) == 1
+    assert internal_summary(telemetry)["status"] == f"{failure_stage}_failed"
+    failures = [
+        call.kwargs["properties"]["consultation_failure_category"]
+        for call in generation_capture.call_args_list
+        if "consultation_failure_category" in call.kwargs["properties"]
+    ]
+    assert failures == ["timeout"]
 
 
 @pytest.mark.parametrize("failure", ["error", "error_usage", "exception", "empty", "usage_only"])
@@ -696,7 +733,55 @@ async def test_legacy_system_message_persona_survives_final_author_pass(provider
             str(message.content) for message in final_req.messages if message.role == "system"
         )
     )
-    assert legacy_persona in trusted_persona
+    assert trusted_persona.count(legacy_persona) == 1
+    assert req == original
+
+
+@pytest.mark.parametrize("provider", ["vertex", "openrouter"])
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_final_instruction_precedes_retrieved_memory_in_provider_payload(provider, legacy):
+    req = request(provider)
+    persona = "Trusted companion persona."
+    recalled = "User reports headaches; quoted memory."
+    req.system_instruction = persona + RAG_HEADER + recalled
+    req.messages = [ChatMessage(role="user", content="¿Este suplemento?")]
+    if legacy:
+        req.messages.insert(0, ChatMessage(role="system", content=req.system_instruction))
+        req.system_instruction = None
+    original = req.model_copy(deep=True)
+    author = Author()
+    await collect(pipeline(vertex=author, alternative=author), req)
+    final_req = author.requests[-1]
+    if provider == "openrouter":
+        payload = OpenRouterGenerationService("test", client=Mock()).build_payload(final_req)
+        instructions = payload["messages"][0]["content"]
+    else:
+        contents = await GenerationService(Mock())._build_contents(
+            final_req, inline_compilation=True
+        )
+        instructions = contents[0].parts[0].text
+    assert instructions.count(persona) == instructions.count(recalled) == 1
+    assert instructions.index("PRIVATE SECOND OPINION") < instructions.index(RAG_HEADER)
+    assert instructions.endswith(recalled)
+    assert req == original
+
+
+async def test_final_does_not_retry_cache_that_failed_in_private_draft():
+    req = request()
+    original = req.model_copy(deep=True)
+
+    def cache_fallback(draft_req):
+        draft_req.cache_fallback_triggered = True
+        draft_req.cache_fallback_error = "Cache expired"
+        return successful_events(draft_req, DRAFT)
+
+    author = Author({"draft": cache_fallback})
+    assert visible_text(await collect(pipeline(vertex=author), req)) == FINAL
+    draft_req, final_req = author.requests
+    assert draft_req.cache_name == original.cache_name
+    assert final_req.cache_name is None
+    assert final_req.cache_fallback_triggered is True
+    assert final_req.cache_fallback_error == "Cache expired"
     assert req == original
 
 
