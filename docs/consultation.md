@@ -59,25 +59,28 @@ context; images are redacted. The actual advisor request receives the full conte
 Existing author telemetry retains its previous content policy. These internal traces
 can contain sensitive conversation material and use the existing PostHog access policy.
 
-Cortex emits aggregate usage once per published response. Tokens include routing,
-draft, advice and final work; BYOK costs include upstream charges when reported.
-Unusable HTTP200 colleague responses retain billed usage. Partial final failures
-retain all known usage, without inventing missing author billing. `known_cost_usd`
-is a lower bound; `cost_complete=false` on failure or unknown-stage costs. Vertex
-currently has no returned dollar estimate, so mixed Vertex/OpenRouter totals remain
-incomplete. Published grounding/cache metadata belongs only to the published author;
-colleague sources are separate and label provider annotations vs model-written links.
+Public SSE usage remains the published author's original provider usage, or the
+original draft's usage when that draft is replayed. Routing, private drafts, advice
+and failed final attempts are not added to chat quotas, token totals or message costs.
+The chat continues counting the published reply as one ordinary message.
+No consultation metadata is sent to Convex or persisted alongside chat messages.
 
-Convex validates and persists internal `metadata.consultation`, associates its trace
-with analytics, and strips this metadata from public message queries. Invalid metadata
-is dropped without blocking answer persistence. Telemetry failures never block chat.
-Search for the trace ID in PostHog LLM Analytics and `consultation.completed` logs.
+Internal logs and PostHog retain the actual work per stage, including reported usage
+from unusable HTTP200 colleague responses and failed final attempts. BYOK costs include
+upstream charges when reported. `known_cost_usd` is a lower bound; `cost_complete=false`
+on failure or unknown-stage costs. Vertex currently has no returned dollar estimate.
+Published grounding/cache metadata belongs only to the published author; colleague
+sources remain in internal traces with provider-annotation vs model-link provenance.
+
+The integration needs no chat frontend, Convex schema or product analytics changes.
+Search by the shared trace/session/user identity in PostHog LLM Analytics and by
+trace ID in `consultation.completed` server logs. Telemetry failures never block chat.
 
 ## Tests and evaluation
 
 `make verify` covers client routing/search/context, hard deadlines, both author
 providers, request immutability, realistic SSE null usage, buffering, fail-open,
-partial accounting, grounding identity, cancellation and telemetry failures. Run
+public usage isolation, grounding identity, cancellation and telemetry failures. Run
 `npm run verify:build` in the chat repo for Convex/public boundary and frontend tests.
 These deterministic tests validate orchestration and recovery behavior, not clinical
 accuracy or the factual quality of generated advice. Validate model changes separately

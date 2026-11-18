@@ -222,9 +222,6 @@ class UsageData(BaseModel):
     cost: float | None = Field(
         default=None, description="Generation cost in USD reported by the provider"
     )
-    consultation: dict[str, object] | None = Field(
-        default=None, description="Internal second-opinion routing, outcome and stage usage"
-    )
     rag_enabled: bool | None = Field(
         default=None, description="Whether GraphRAG context retrieval ran"
     )

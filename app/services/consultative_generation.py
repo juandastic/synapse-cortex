@@ -121,52 +121,25 @@ class ConsultativeGenerationService:
             "cost": openrouter_usage_properties(usage).get("$ai_total_cost_usd"),
         }
 
-    def _with_usage(self, event: str, summary: dict, stages: dict) -> str:
+    @staticmethod
+    def _observe_usage(event: str, stages: dict) -> str:
+        """Keep provider usage unchanged for chat; observe it only in telemetry."""
         chunk = _decode(event)
-        if chunk is None or chunk.get("usage") is None:
-            return event
-        final_usage = chunk["usage"]
-        all_stages = dict(stages)
-        if final_usage:
-            all_stages["published"] = self._normalize_usage(final_usage)
-        totals = {
-            key: sum(stage.get(key) or 0 for stage in all_stages.values())
-            for key in (
-                "prompt_tokens",
-                "completion_tokens",
-                "total_tokens",
-                "thoughts_tokens",
-                "cached_tokens",
-            )
-        }
-        known_cost = sum(stage.get("cost") or 0 for stage in all_stages.values())
-        cost_complete = all(stage.get("cost") is not None for stage in all_stages.values()) and (
-            summary["status"]
-            not in {
-                "routing_failed",
-                "draft_failed",
-                "advice_failed",
-                "final_failed",
-                "final_failed_partial",
-            }
-        )
-        summary.update(
-            stages=all_stages,
-            known_cost_usd=known_cost,
-            cost_complete=cost_complete,
-        )
-        # Grounding and identity describe only the published answer. Token totals
-        # include the private work so quotas do not undercount consultation turns.
-        chunk["usage"] = {
-            **final_usage,
-            **totals,
-            "cost": known_cost if cost_complete else None,
-            "consultation": dict(summary),
-        }
-        return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+        if chunk is not None and chunk.get("usage") is not None:
+            stages["published"] = ConsultativeGenerationService._normalize_usage(chunk["usage"])
+        return event
 
     @staticmethod
     def _record(request, summary, started):
+        stages = summary["stages"]
+        summary.update(
+            known_cost_usd=sum(stage.get("cost") or 0 for stage in stages.values()),
+            cost_complete=(
+                summary["status"] in {"skipped", "consulted"}
+                and "published" in stages
+                and all(stage.get("cost") is not None for stage in stages.values())
+            ),
+        )
         safe = {
             "consultation_policy_version": POLICY_VERSION,
             "consultation_status": summary["status"],
@@ -263,6 +236,7 @@ class ConsultativeGenerationService:
             "trace_id": request.posthog_trace_id,
         }
         stages = {}
+        summary["stages"] = stages
         try:
             try:
                 with trace.get_tracer(__name__).start_as_current_span("consultation.routing"):
@@ -286,12 +260,14 @@ class ConsultativeGenerationService:
                 if decision is not None:
                     summary["status"] = "skipped"
                 async for event in self._closed_generate(request, cache_manager):
-                    yield self._with_usage(event, summary, stages)
+                    yield self._observe_usage(event, stages)
                 return
 
             draft_request = request.model_copy(deep=True)
             draft_request.generation_stage = "draft"
             draft = await self._collect(self._closed_generate(draft_request, cache_manager))
+            if draft.usage:
+                stages["draft"] = self._normalize_usage(draft.usage)
             if (
                 draft.failed
                 or not draft.done
@@ -299,7 +275,7 @@ class ConsultativeGenerationService:
                 or draft.finish_reason not in ("stop", "end_turn")
             ):
                 summary["status"] = "draft_failed"
-                async for event in self._replay(draft, summary, stages):
+                for event in draft.events:
                     yield event
                 return
 
@@ -315,7 +291,7 @@ class ConsultativeGenerationService:
                 summary.update(status="advice_failed", error_type=type(error).__name__)
                 if getattr(error, "usage", None):
                     stages["advice"] = self._normalize_usage(error.usage)
-                async for event in self._replay(draft, summary, stages):
+                for event in draft.events:
                     yield event
                 return
 
@@ -329,7 +305,6 @@ class ConsultativeGenerationService:
                 routing_ms=decision.duration_ms,
                 advice_ms=advice.duration_ms,
             )
-            stages["draft"] = self._normalize_usage(draft.usage)
             stages["advice"] = self._normalize_usage(advice.usage)
             final_request = request.model_copy(deep=True)
             final_request.generation_stage = "final"
@@ -373,10 +348,11 @@ class ConsultativeGenerationService:
                                 raise RuntimeError("FinalGenerationFailed")
                             summary["status"] = "final_failed_partial"
                             terminal_error = True
-                            if not usage_sent:
-                                chunk.setdefault("usage", (pending_usage or {}).get("usage", {}))
+                            if not usage_sent and pending_usage is not None:
+                                if chunk.get("usage") is None:
+                                    chunk["usage"] = pending_usage["usage"]
+                                    event = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                                 pending_usage = None
-                                event = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
                         if chunk:
                             has_content = any(
                                 choice.get("delta", {}).get("content")
@@ -390,7 +366,7 @@ class ConsultativeGenerationService:
                                 for pending in pending_events:
                                     yield pending
                                 pending_events.clear()
-                            # Hold billing until the terminal outcome is known. A provider
+                            # Hold author usage until the terminal outcome is known. A provider
                             # can report usage and then fail or omit its final DONE marker.
                             if chunk.get("usage") is not None and not chunk.get("error"):
                                 pending_usage = chunk
@@ -405,9 +381,8 @@ class ConsultativeGenerationService:
                             continue
                         sent_done = sent_done or "data: [DONE]" in event
                         if sent_done and pending_usage is not None:
-                            yield self._with_usage(
+                            yield self._observe_usage(
                                 f"data: {json.dumps(pending_usage, ensure_ascii=False)}\n\n",
-                                summary,
                                 stages,
                             )
                             pending_usage = None
@@ -415,7 +390,7 @@ class ConsultativeGenerationService:
                         usage_sent = usage_sent or bool(
                             chunk is not None and chunk.get("usage") is not None
                         )
-                        yield self._with_usage(event, summary, stages)
+                        yield self._observe_usage(event, stages)
                 if not published and not terminal_error:
                     raise RuntimeError("FinalGenerationEmpty")
                 if published and not sent_done:
@@ -430,35 +405,17 @@ class ConsultativeGenerationService:
                                 "code": "CONSULTATION_FINAL_INTERRUPTED",
                             }
                         }
-                        if not usage_sent:
-                            chunk["usage"] = (pending_usage or {}).get("usage", {})
-                        yield self._with_usage(f"data: {json.dumps(chunk)}\n\n", summary, stages)
+                        if not usage_sent and pending_usage is not None:
+                            chunk["usage"] = pending_usage["usage"]
+                        yield self._observe_usage(f"data: {json.dumps(chunk)}\n\n", stages)
                     if not sent_done:
                         yield "data: [DONE]\n\n"
                 else:
                     summary.update(status="final_failed", error_type=type(error).__name__)
-                    # The draft becomes published, so do not count its usage twice.
-                    replay_stages = {key: value for key, value in stages.items() if key != "draft"}
-                    async for event in self._replay(draft, summary, replay_stages):
+                    for event in draft.events:
                         yield event
         except (asyncio.CancelledError, GeneratorExit):
             summary["status"] = "cancelled"
             raise
         finally:
             self._record(request, summary, started)
-
-    async def _replay(self, draft, summary, stages):
-        has_usage = any(
-            chunk is not None and chunk.get("usage") is not None
-            for chunk in (_decode(event) for event in draft.events)
-        )
-        for event in draft.events:
-            chunk = _decode(event)
-            if not has_usage and chunk and chunk.get("error"):
-                chunk["usage"] = {}
-                event = f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-                has_usage = True
-            if not has_usage and "data: [DONE]" in event:
-                yield self._with_usage('data: {"choices": [], "usage": {}}\n\n', summary, stages)
-                has_usage = True
-            yield self._with_usage(event, summary, stages)

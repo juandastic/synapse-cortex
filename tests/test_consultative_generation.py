@@ -111,8 +111,29 @@ def visible_text(events):
 
 def final_usage(events):
     reported = [chunk["usage"] for chunk in data_chunks(events) if chunk.get("usage")]
-    assert len(reported) == 1, "A public answer must report its combined usage exactly once"
+    assert len(reported) == 1, "Publish genuine author usage exactly once when available"
+    assert "consultation" not in reported[0]
     return reported[0]
+
+
+def internal_summary(telemetry):
+    pipeline_calls = [
+        call
+        for call in telemetry.call_args_list
+        if call.kwargs.get("name") == "consultation.pipeline"
+    ]
+    assert len(pipeline_calls) == 1
+    return pipeline_calls[0].kwargs["properties"]["summary"]
+
+
+def internal_tokens(summary):
+    return sum(stage["total_tokens"] for stage in summary["stages"].values())
+
+
+def assert_no_public_consultation(events):
+    for chunk in data_chunks(events):
+        assert "consultation" not in chunk
+        assert "consultation" not in (chunk.get("usage") or {})
 
 
 class Author:
@@ -180,7 +201,9 @@ def pipeline(advisor=None, *, vertex=None, alternative=None, enabled=True):
 
 
 async def collect(service, req):
-    return [chunk async for chunk in service.stream_chat_completion(req)]
+    events = [chunk async for chunk in service.stream_chat_completion(req)]
+    assert_no_public_consultation(events)
+    return events
 
 
 @pytest.fixture(autouse=True)
@@ -209,7 +232,7 @@ async def test_disabled_pipeline_is_byte_identical_and_does_not_consult(provider
     assert not other.requests
 
 
-async def test_general_turn_uses_original_author_once_and_accounts_for_routing():
+async def test_general_turn_preserves_author_usage_and_records_routing_internally(telemetry):
     advisor = consultant("general")
     author = Author()
     events = await collect(pipeline(advisor, vertex=author), request())
@@ -217,16 +240,55 @@ async def test_general_turn_uses_original_author_once_and_accounts_for_routing()
     assert [req.generation_stage for req in author.requests] == ["response"]
     advisor.advise.assert_not_awaited()
     reported = final_usage(events)
-    assert reported["total_tokens"] == 16
-    assert reported["cost"] == pytest.approx(0.011)
-    assert reported["consultation"]["status"] == "skipped"
+    assert reported == usage()
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == 16
+    assert summary["known_cost_usd"] == pytest.approx(0.011)
+    assert summary["status"] == "skipped"
     assert events.count(DONE) == 1
+
+
+@pytest.mark.parametrize("provider", ["vertex", "openrouter"])
+@pytest.mark.parametrize("route_failed", [False, True])
+async def test_general_and_route_failure_preserve_entire_author_sse_bytes(provider, route_failed):
+    req = request(provider)
+    expected = [": original provider heartbeat\n\n", *successful_events(req, FINAL)]
+    author = Author({"response": expected})
+    advisor = consultant("general")
+    if route_failed:
+        advisor.classify.side_effect = ConsultationError("provider_error")
+    service = pipeline(
+        advisor,
+        vertex=author if provider == "vertex" else Author(),
+        alternative=author if provider == "openrouter" else Author(),
+    )
+    assert await collect(service, req) == expected
+    advisor.advise.assert_not_awaited()
+
+
+@pytest.mark.parametrize("provider", ["vertex", "openrouter"])
+@pytest.mark.parametrize("failure_stage", ["advice", "final"])
+async def test_fallback_preserves_draft_bytes_and_never_adds_internal_metadata(
+    provider, failure_stage
+):
+    req = request(provider)
+    draft_events = successful_events(req, DRAFT, usage(19, 4, 0.007, cached_tokens=9))
+    author = Author({"draft": draft_events, "final": [event(req, error="unavailable")]})
+    advisor = consultant()
+    if failure_stage == "advice":
+        advisor.advise.side_effect = ConsultationError("provider_error")
+    service = pipeline(
+        advisor,
+        vertex=author if provider == "vertex" else Author(),
+        alternative=author if provider == "openrouter" else Author(),
+    )
+    assert await collect(service, req) == draft_events
 
 
 @pytest.mark.parametrize("provider", ["vertex", "openrouter"])
 @pytest.mark.parametrize("category", ["general", "medical"])
 async def test_real_serialized_chunks_with_null_usage_preserve_successful_public_stream(
-    provider, category
+    provider, category, telemetry
 ):
     req = request(provider)
 
@@ -276,14 +338,17 @@ async def test_real_serialized_chunks_with_null_usage_preserve_successful_public
     assert not any(chunk.get("error") for chunk in data_chunks(events))
     assert events.count(DONE) == 1
     report = final_usage(events)
-    assert report["total_tokens"] == (53 if category == "medical" else 16)
-    assert report["consultation"]["status"] == ("consulted" if category == "medical" else "skipped")
+    assert report["total_tokens"] == 12
+    assert report["cost"] == 0.01
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == (53 if category == "medical" else 16)
+    assert summary["status"] == ("consulted" if category == "medical" else "skipped")
 
 
 @pytest.mark.parametrize("provider", ["vertex", "openrouter"])
 @pytest.mark.parametrize("category", ["medical", "mixed"])
 async def test_context_and_images_reach_consultant_but_only_author_final_is_published(
-    provider, category
+    provider, category, telemetry
 ):
     req = request(provider)
     original = req.model_copy(deep=True)
@@ -315,12 +380,13 @@ async def test_context_and_images_reach_consultant_but_only_author_final_is_publ
     assert all(chunk["model"] == original.model for chunk in chunks)
     assert all(chunk["provider"] == original.provider for chunk in chunks)
     assert events.count(DONE) == 1
-    report = final_usage(events)
-    assert report["consultation"]["status"] == "consulted"
-    assert report["consultation"]["model"] == "openai/consultant-test"
+    assert final_usage(events) == usage()
+    summary = internal_summary(telemetry)
+    assert summary["status"] == "consulted"
+    assert summary["model"] == "openai/consultant-test"
 
 
-async def test_usage_sums_private_work_but_grounding_and_cache_describe_published_answer():
+async def test_private_usage_is_internal_and_public_grounding_and_cache_belong_to_author(telemetry):
     req = request()
     draft_sources = [{"title": "Draft source", "uri": "https://example.org/draft"}]
     final_sources = [{"title": "Final source", "uri": "https://example.org/final"}]
@@ -357,26 +423,31 @@ async def test_usage_sums_private_work_but_grounding_and_cache_describe_publishe
     advisor = consultant()
     events = await collect(pipeline(advisor, vertex=author), req)
     report = final_usage(events)
-    assert report["prompt_tokens"] == 63
-    assert report["completion_tokens"] == 14
-    assert report["total_tokens"] == 77
-    assert report["thoughts_tokens"] == 11
-    assert report["cost"] == pytest.approx(0.061)
+    assert report["prompt_tokens"] == 30
+    assert report["completion_tokens"] == 6
+    assert report["total_tokens"] == 36
+    assert report["thoughts_tokens"] == 7
+    assert report["cost"] == pytest.approx(0.03)
     assert report["grounding_sources"] == final_sources
     assert report["cache_used"] is False
     assert advisor.advise.await_args.args[2] == draft_sources
-    assert report["consultation"]["sources"] == [
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == 77
+    assert summary["known_cost_usd"] == pytest.approx(0.061)
+    assert summary["sources"] == [
         {
             "title": "Caffeine evidence",
             "url": "https://example.org/evidence",
             "provenance": "provider_annotation",
         }
     ]
-    assert report["consultation"]["cost_complete"] is True
+    assert summary["cost_complete"] is True
 
 
 @pytest.mark.parametrize("missing_stage", ["routing", "draft", "advice", "final"])
-async def test_unknown_stage_cost_is_not_misreported_as_complete_zero(missing_stage):
+async def test_unknown_stage_cost_is_visible_only_in_internal_billing_summary(
+    missing_stage, telemetry
+):
     req = request()
     amounts = {
         stage: usage(1, 1, None if stage == missing_stage else 0.01)
@@ -390,13 +461,14 @@ async def test_unknown_stage_cost_is_not_misreported_as_complete_zero(missing_st
         }
     )
     report = final_usage(await collect(pipeline(advisor, vertex=author), req))
-    assert report["cost"] is None
-    assert report["total_tokens"] == 8
-    assert report["consultation"]["cost_complete"] is False
-    assert report["consultation"]["known_cost_usd"] == pytest.approx(0.03)
+    assert report == amounts["final"]
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == 8
+    assert summary["cost_complete"] is False
+    assert summary["known_cost_usd"] == pytest.approx(0.03)
 
 
-async def test_byok_upstream_cost_and_reasoning_tokens_are_accounted_for():
+async def test_byok_upstream_cost_and_reasoning_tokens_are_recorded_internally(telemetry):
     advisor = consultant(
         routing_usage={
             "input_tokens": 3,
@@ -415,14 +487,18 @@ async def test_byok_upstream_cost_and_reasoning_tokens_are_accounted_for():
         ),
     )
     report = final_usage(await collect(pipeline(advisor), request()))
-    assert report["cost"] == pytest.approx(0.062)
-    assert report["thoughts_tokens"] == 3
-    assert report["total_tokens"] == 53
+    assert report == usage()
+    summary = internal_summary(telemetry)
+    assert summary["known_cost_usd"] == pytest.approx(0.062)
+    assert summary["stages"]["advice"]["thoughts_tokens"] == 3
+    assert internal_tokens(summary) == 53
 
 
 @pytest.mark.parametrize("failure_stage", ["routing", "advice"])
 @pytest.mark.parametrize("failure_type", ["exception", "timeout"])
-async def test_consultant_errors_and_hard_timeouts_fail_open(failure_stage, failure_type):
+async def test_consultant_errors_and_hard_timeouts_fail_open(
+    failure_stage, failure_type, telemetry
+):
     advisor = consultant()
     cancelled = asyncio.Event()
 
@@ -445,20 +521,24 @@ async def test_consultant_errors_and_hard_timeouts_fail_open(failure_stage, fail
     assert visible_text(events) == (FINAL if failure_stage == "routing" else DRAFT)
     assert ADVICE not in "".join(events)
     assert events.count(DONE) == 1
-    report = final_usage(events)
-    assert report["consultation"]["status"] == f"{failure_stage}_failed"
-    assert report["total_tokens"] == (12 if failure_stage == "routing" else 16)
+    assert final_usage(events) == usage()
+    summary = internal_summary(telemetry)
+    assert summary["status"] == f"{failure_stage}_failed"
+    assert internal_tokens(summary) == (12 if failure_stage == "routing" else 16)
     if failure_type == "timeout":
         assert cancelled.is_set(), "Timeout must cancel the upstream consultation"
     if failure_stage == "routing":
         advisor.advise.assert_not_awaited()
 
 
-@pytest.mark.parametrize("failure", ["error", "exception", "empty", "usage_only"])
-async def test_final_failure_before_content_replays_draft_once_without_private_advice(failure):
+@pytest.mark.parametrize("failure", ["error", "error_usage", "exception", "empty", "usage_only"])
+async def test_final_failure_before_content_replays_draft_once_without_private_advice(
+    failure, telemetry
+):
     req = request()
     scripts = {
         "error": [event(req, error="upstream unavailable")],
+        "error_usage": [event(req, error="upstream unavailable", usage=usage(1, 1, 0.001))],
         "exception": [RuntimeError("upstream unavailable")],
         "empty": [DONE],
         "usage_only": [event(req, usage=usage(1, 1, 0.001), finish="stop"), DONE],
@@ -468,15 +548,16 @@ async def test_final_failure_before_content_replays_draft_once_without_private_a
     assert ADVICE not in "".join(events)
     assert not any(chunk.get("error") for chunk in data_chunks(events))
     assert events.count(DONE) == 1
-    report = final_usage(events)
-    assert report["consultation"]["status"] == "final_failed"
-    assert report["total_tokens"] == (43 if failure == "usage_only" else 41)
+    assert final_usage(events) == usage()
+    summary = internal_summary(telemetry)
+    assert summary["status"] == "final_failed"
+    assert internal_tokens(summary) == (43 if failure in {"usage_only", "error_usage"} else 41)
 
 
 @pytest.mark.parametrize("failure", ["error", "exception", "eof"])
 @pytest.mark.parametrize("provider", ["vertex", "openrouter"])
 async def test_failure_after_final_text_never_concatenates_draft_or_leaves_stream_unterminated(
-    failure, provider
+    failure, provider, telemetry
 ):
     req = request(provider)
     tail = [event(req, error="upstream disconnected")]
@@ -498,22 +579,19 @@ async def test_failure_after_final_text_never_concatenates_draft_or_leaves_strea
     assert "provider secret must not leak" not in "".join(events)
     assert any(chunk.get("error") for chunk in data_chunks(events))
     assert events.count(DONE) == 1
-    report = final_usage(events)
-    assert report["total_tokens"] == 41
-    assert report["prompt_tokens"] == 33
-    assert report["completion_tokens"] == 8
-    assert report["cost"] is None
-    summary = report["consultation"]
+    assert not any(chunk.get("usage") is not None for chunk in data_chunks(events))
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == 41
     assert summary["status"] == "final_failed_partial"
     assert summary["cost_complete"] is False
     assert summary["known_cost_usd"] == pytest.approx(0.031)
     assert "published" not in summary["stages"], "Missing author usage must remain unknown"
-    usage_position = next(i for i, frame in enumerate(events) if '"usage"' in frame)
-    assert usage_position < events.index(DONE)
 
 
 @pytest.mark.parametrize("failure", ["error", "exception", "eof"])
-async def test_usage_before_final_failure_is_reported_once_with_terminal_failure_status(failure):
+async def test_usage_before_final_failure_is_preserved_and_failure_status_is_internal(
+    failure, telemetry
+):
     req = request()
     tail = {
         "error": [event(req, error="provider disconnected"), DONE],
@@ -532,17 +610,17 @@ async def test_usage_before_final_failure_is_reported_once_with_terminal_failure
     events = await collect(pipeline(vertex=author), req)
     assert visible_text(events) == "Published partial"
     assert any(chunk.get("error") for chunk in data_chunks(events))
-    report = final_usage(events)
-    assert report["total_tokens"] == 53
-    assert report["consultation"]["status"] == "final_failed_partial"
-    assert report["consultation"]["cost_complete"] is False
-    assert report["consultation"]["known_cost_usd"] == pytest.approx(0.041)
-    assert report["cost"] is None
+    assert final_usage(events) == usage()
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == 53
+    assert summary["status"] == "final_failed_partial"
+    assert summary["cost_complete"] is False
+    assert summary["known_cost_usd"] == pytest.approx(0.041)
     assert events.count(DONE) == 1
 
 
 @pytest.mark.parametrize("provider", ["vertex", "openrouter"])
-async def test_partial_error_frame_counts_published_usage_once(provider):
+async def test_partial_error_frame_preserves_real_published_usage_once(provider, telemetry):
     req = request(provider)
     partial_usage = usage(5, 2, 0.004, thoughts_tokens=1)
     author = Author(
@@ -562,20 +640,19 @@ async def test_partial_error_frame_counts_published_usage_once(provider):
     assert visible_text(events) == "Published partial"
     assert DRAFT not in "".join(events)
     report = final_usage(events)
-    assert report["prompt_tokens"] == 38
-    assert report["completion_tokens"] == 10
-    assert report["total_tokens"] == 48
-    assert report["thoughts_tokens"] == 1
-    assert report["consultation"]["stages"]["published"]["total_tokens"] == 7
-    assert report["consultation"]["known_cost_usd"] == pytest.approx(0.035)
-    assert report["consultation"]["cost_complete"] is False
-    assert report["consultation"]["status"] == "final_failed_partial"
+    assert report == partial_usage
+    summary = internal_summary(telemetry)
+    assert summary["stages"]["published"]["total_tokens"] == 7
+    assert internal_tokens(summary) == 48
+    assert summary["known_cost_usd"] == pytest.approx(0.035)
+    assert summary["cost_complete"] is False
+    assert summary["status"] == "final_failed_partial"
     assert events.count(DONE) == 1
 
 
 @pytest.mark.parametrize("failure_stage", ["routing", "advice"])
 async def test_consultation_error_preserves_known_billable_usage_and_marks_incomplete(
-    failure_stage,
+    failure_stage, telemetry
 ):
     advisor = consultant()
     error = ConsultationError("invalid_response")
@@ -586,10 +663,9 @@ async def test_consultation_error_preserves_known_billable_usage_and_marks_incom
         advisor.advise.side_effect = error
     events = await collect(pipeline(advisor), request())
     assert visible_text(events) == (FINAL if failure_stage == "routing" else DRAFT)
-    report = final_usage(events)
-    assert report["total_tokens"] == (22 if failure_stage == "routing" else 26)
-    assert report["cost"] is None
-    summary = report["consultation"]
+    assert final_usage(events) == usage()
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == (22 if failure_stage == "routing" else 26)
     assert summary["status"] == f"{failure_stage}_failed"
     assert summary["cost_complete"] is False
     assert summary["known_cost_usd"] == pytest.approx(
@@ -637,7 +713,7 @@ async def test_draft_failure_is_not_sent_to_consultant():
     assert [r.generation_stage for r in author.requests] == ["draft"]
 
 
-async def test_failed_draft_without_author_usage_preserves_routing_bill_and_original_error():
+async def test_failed_draft_without_usage_keeps_routing_bill_internal_and_original_error(telemetry):
     req = request()
     original_error = "Author provider could not connect"
     author = Author({"draft": [event(req, error=original_error), DONE]})
@@ -648,12 +724,9 @@ async def test_failed_draft_without_author_usage_preserves_routing_bill_and_orig
     errors = [chunk["error"] for chunk in chunks if chunk.get("error")]
     assert errors == [{"message": original_error}]
     assert all(chunk["model"] == req.model for chunk in chunks)
-    report = final_usage(events)
-    assert report["prompt_tokens"] == 3
-    assert report["completion_tokens"] == 1
-    assert report["total_tokens"] == 4
-    assert report["cost"] is None
-    summary = report["consultation"]
+    assert not any(chunk.get("usage") is not None for chunk in chunks)
+    summary = internal_summary(telemetry)
+    assert internal_tokens(summary) == 4
     assert summary["status"] == "draft_failed"
     assert summary["known_cost_usd"] == pytest.approx(0.001)
     assert summary["cost_complete"] is False
@@ -683,7 +756,11 @@ async def test_pipeline_emits_traceable_metadata_without_draft_in_pipeline_analy
     assert props["consultation_status"] == "consulted"
     assert props["consultation_source_count"] == 1
     assert props["consultation_search_used"] is True
-    assert props["summary"]["stages"] == final_usage(events)["consultation"]["stages"]
+    assert (
+        props["summary"]["stages"]["published"]["total_tokens"]
+        == final_usage(events)["total_tokens"]
+    )
+    assert internal_tokens(props["summary"]) == 53
     assert DRAFT not in json.dumps(props)
     assert ADVICE not in json.dumps(props)
 
@@ -801,7 +878,7 @@ async def test_slow_consultation_heartbeats_are_sse_comments_without_visible_con
 
 @pytest.mark.parametrize("provider", ["vertex", "openrouter"])
 async def test_production_router_refreshes_memory_before_rag_routing_and_selected_author(
-    monkeypatch, provider
+    monkeypatch, provider, telemetry
 ):
     app = FastAPI()
     app.include_router(router)
@@ -860,4 +937,6 @@ async def test_production_router_refreshes_memory_before_rag_routing_and_selecte
         assert all(r.cache_name is None for r in author.requests)
     else:
         assert author.cache_managers == [app.state.cache_manager, app.state.cache_manager]
-    assert final_usage([response.text])["consultation"]["trace_id"] == route_req.posthog_trace_id
+    assert final_usage([response.text]) == usage()
+    assert_no_public_consultation([response.text])
+    assert internal_summary(telemetry)["trace_id"] == route_req.posthog_trace_id
